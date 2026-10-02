@@ -115,6 +115,8 @@ def test_telemetry_websocket_unsubscribes_when_instance_is_deleted():
     import asyncio
 
     class Fanout:
+        closed = False
+
         def __init__(self):
             self.clients = set()
 
@@ -144,3 +146,20 @@ def test_telemetry_websocket_unsubscribes_when_instance_is_deleted():
                 raise AssertionError("WebSocket stayed open after instance deletion")
 
     assert not fanout.clients
+
+
+def test_websocket_closes_on_fast_generation_change():
+    service = FakeService(Settings())
+    old = TelemetryFanout(object(), "instance-a")
+    record = SimpleNamespace(status="running", telemetry=old)
+    service._get_running = lambda _: record
+    with TestClient(create_app(Settings(), lambda _: service)) as client:
+        with client.websocket_connect("/api/v1/instances/instance-a/telemetry") as socket:
+            record.telemetry = TelemetryFanout(object(), "instance-a")
+            try:
+                socket.receive_json()
+            except WebSocketDisconnect as exc:
+                assert exc.code == 1012
+            else:
+                raise AssertionError("old generation survived restart")
+    assert not old.clients

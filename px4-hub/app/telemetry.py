@@ -31,6 +31,7 @@ class TelemetryFanout:
         self.instance_id = instance_id
         self.clients: set[asyncio.Queue] = set()
         self.tasks: list[asyncio.Task] = []
+        self.closed = False
         self.last_received: float | None = None
         self.position_received = asyncio.Event()
         self.latest: dict[str, dict] = {}
@@ -70,6 +71,7 @@ class TelemetryFanout:
         self.clients.discard(queue)
 
     async def close(self):
+        self.closed = True
         for task in self.tasks:
             task.cancel()
         await asyncio.gather(*self.tasks, return_exceptions=True)

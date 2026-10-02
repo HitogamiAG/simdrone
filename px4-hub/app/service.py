@@ -36,10 +36,10 @@ class Instance:
 class InstanceService:
     parameter_names = ("MPC_XY_VEL_MAX", "MPC_Z_VEL_MAX_UP", "MPC_Z_VEL_MAX_DN")
 
-    def __init__(self, settings):
+    def __init__(self, settings, gazebo=None, px4=None):
         self.settings = settings
-        self.gazebo = GazeboApi(settings.gazebo_api_url)
-        self.px4 = Px4Adapter(settings)
+        self.gazebo = gazebo if gazebo is not None else GazeboApi(settings.gazebo_api_url)
+        self.px4 = px4 if px4 is not None else Px4Adapter(settings)
         self.instances: dict[str, Instance] = {}
         self.lock = asyncio.Lock()
         self.poller: asyncio.Task | None = None
@@ -60,8 +60,12 @@ class InstanceService:
         async with self.lock:
             records = list(self.instances.values())
             self.instances.clear()
-        await asyncio.gather(*(self._dispose(item, remove_dir=True) for item in records), return_exceptions=True)
+        await asyncio.gather(*(self._shutdown_record(item) for item in records))
         await self.gazebo.close()
+
+    async def _shutdown_record(self, record):
+        async with record.operation_lock:
+            await self._dispose(record, remove_dir=True)
 
     async def _poll_gazebo(self):
         while not self.closed:
@@ -93,6 +97,8 @@ class InstanceService:
         if drone.get("model") != "x500_gimbal":
             raise HubError(422, "incompatible_drone", "PX4 profile requires a Gazebo x500_gimbal", {"model": drone.get("model")})
         async with self.lock:
+            if self.closed:
+                raise HubError(503, "hub_stopping", "Hub is shutting down")
             if any(item.drone_id == drone_id for item in self.instances.values()):
                 raise HubError(409, "drone_already_bound", "Gazebo drone already has a PX4 instance")
             occupied = {item.slot for item in self.instances.values()}
@@ -103,18 +109,25 @@ class InstanceService:
             workdir = self.settings.instance_dir / instance_id
             record = Instance(instance_id, drone_id, drone["name"], drone.get("entity_id"), slot, workdir)
             self.instances[instance_id] = record
-        try:
-            await self._start_record(record)
-        except Exception as exc:
-            record.status = "failed"
-            record.last_error = str(exc)
-            await self._dispose(record, remove_dir=True)
-            async with self.lock:
-                self.instances.pop(record.id, None)
-            if isinstance(exc, TimeoutError):
-                raise HubError(504, "startup_timeout", str(exc)) from exc
-            raise HubError(503, "instance_start_failed", "PX4 instance failed to start", str(exc)) from exc
-        return self.serialize(record)
+        async with record.operation_lock:
+            try:
+                if self.closed:
+                    raise HubError(503, "hub_stopping", "Hub is shutting down")
+                await self._start_record(record)
+            except BaseException as exc:
+                record.status = "failed"
+                record.last_error = str(exc)
+                await self._dispose(record, remove_dir=True)
+                async with self.lock:
+                    self.instances.pop(record.id, None)
+                if isinstance(exc, asyncio.CancelledError):
+                    raise
+                if isinstance(exc, HubError):
+                    raise
+                if isinstance(exc, TimeoutError):
+                    raise HubError(504, "startup_timeout", str(exc)) from exc
+                raise HubError(503, "instance_start_failed", "PX4 instance failed to start", str(exc)) from exc
+            return self.serialize(record)
 
     async def get(self, instance_id):
         return self.serialize(self._get(instance_id))
@@ -141,6 +154,8 @@ class InstanceService:
     async def delete(self, instance_id):
         record = self._get(instance_id)
         async with record.operation_lock:
+            if self.instances.get(instance_id) is not record:
+                raise HubError(404, "instance_not_found", "PX4 instance does not exist")
             record.status = "stopping"
             if record.monitor:
                 record.monitor.cancel()
@@ -152,27 +167,35 @@ class InstanceService:
         return {"deleted": True, "id": instance_id, "gazebo_drone_preserved": True}
 
     async def get_parameters(self, instance_id):
-        record = self._get_running(instance_id)
-        try:
-            return await self.px4.get_parameters(record)
-        except Exception as exc:
-            raise HubError(503, "parameter_read_failed", "Could not read PX4 parameters", str(exc)) from exc
+        record = self._get(instance_id)
+        async with record.operation_lock:
+            self._get_running(instance_id)
+            try:
+                return await self.px4.get_parameters(record)
+            except Exception as exc:
+                raise HubError(503, "parameter_read_failed", "Could not read PX4 parameters", str(exc)) from exc
 
     async def patch_parameters(self, instance_id, values):
-        record = self._get_running(instance_id)
-        await self._require_running_world()
-        requested = {key: value for key, value in values.items() if value is not None}
-        if not requested:
-            raise HubError(422, "empty_patch", "At least one supported parameter is required")
-        applied, unconfirmed = {}, {}
-        for name, value in requested.items():
+        record = self._get(instance_id)
+        async with record.operation_lock:
+            self._get_running(instance_id)
+            await self._require_running_world()
+            requested = {key: value for key, value in values.items() if value is not None}
+            if not requested:
+                raise HubError(422, "empty_patch", "At least one supported parameter is required")
+            applied, unconfirmed = {}, {}
+            for name, value in requested.items():
+                try:
+                    applied[name] = await self.px4.set_parameter(record, name, value)
+                except Exception as exc:
+                    unconfirmed[name] = str(exc)
+            if unconfirmed:
+                raise HubError(503, "parameter_patch_partial", "Some PX4 parameters were not confirmed", {"applied": applied, "unconfirmed": unconfirmed})
             try:
-                applied[name] = await self.px4.set_parameter(record, name, value)
+                parameters = await self.px4.get_parameters(record)
             except Exception as exc:
-                unconfirmed[name] = str(exc)
-        if unconfirmed:
-            raise HubError(503, "parameter_patch_partial", "Some PX4 parameters were not confirmed", {"applied": applied, "unconfirmed": unconfirmed})
-        return {"applied": applied, "parameters": await self.get_parameters(instance_id)}
+                raise HubError(503, "parameter_patch_partial", "Changes confirmed but final snapshot unavailable", {"applied": applied, "unconfirmed": {}, "snapshot_error": str(exc)}) from exc
+            return {"applied": applied, "parameters": parameters}
 
     def _get(self, instance_id):
         record = self.instances.get(instance_id)
@@ -199,7 +222,7 @@ class InstanceService:
         record.status, record.last_error = "starting", None
         try:
             await asyncio.wait_for(self.px4.start(record), self.settings.startup_timeout)
-        except Exception:
+        except BaseException:
             await self.px4.stop(record)
             raise
         record.status = "running"
@@ -209,18 +232,17 @@ class InstanceService:
         waits = [asyncio.create_task(record.px4_process.wait()), asyncio.create_task(record.mavsdk_process.wait())]
         try:
             done, pending = await asyncio.wait(waits, return_when=asyncio.FIRST_COMPLETED)
-            if record.status in ("stopping", "restarting") or self.closed:
-                return
-            process = "PX4" if waits[0] in done else "MAVSDK"
-            record.status, record.last_error = "failed", f"{process} process exited unexpectedly"
-            for task in pending:
-                task.cancel()
-            await self.px4.stop(record)
-        except asyncio.CancelledError:
+            async with record.operation_lock:
+                if record.status != "running" or self.closed:
+                    return
+                process = "PX4" if waits[0] in done else "MAVSDK"
+                record.status, record.last_error = "failed", f"{process} process exited unexpectedly"
+                await self.px4.stop(record)
+        finally:
             for task in waits:
-                task.cancel()
+                if not task.done():
+                    task.cancel()
             await asyncio.gather(*waits, return_exceptions=True)
-            raise
 
     async def _dispose(self, record, remove_dir):
         record.status = "stopping"
@@ -258,6 +280,3 @@ class InstanceService:
             "capabilities": {"parameters": True, "telemetry": True, "flight": False,
                              "missions": False, "control": False},
         }
-
-    async def close_stream(self, record):
-        return
