@@ -128,7 +128,7 @@ ws://localhost:8000/api/v1/drones/{drone-id}/sensors/imu_sensor/stream
 }
 ```
 
-`sec` может быть строкой согласно JSON-представлению protobuf int64. Обычная Transport-подписка разделяется между клиентами. Очередь каждого клиента хранит один свежий sample; при паузе искусственные измерения не создаются. Drone-reset/delete закрывает прежние соединения с кодом `1008`, reboot/world-reset — с `1012`; после reset клиент подключается заново. Camera WebSocket отклоняется: видео доступно через RTSP.
+`sec` может быть строкой согласно JSON-представлению protobuf int64. Обычная Transport-подписка разделяется между клиентами. Очередь каждого клиента хранит один свежий sample; при паузе искусственные измерения не создаются. Drone-reset/delete закрывает прежние соединения с кодом `1008`, reboot/world-reset — с `1012`; после reset клиент подключается заново. Camera WebSocket отклоняется: внутренний видеоканал идёт по RTSP в MediaMTX, а браузерный WHEP-контракт предоставляет Backend.
 
 ## Reset и освобождение ресурсов
 
@@ -147,9 +147,11 @@ ws://localhost:8000/api/v1/drones/{drone-id}/sensors/imu_sensor/stream
 
 ## Видео и MediaMTX
 
-Путь публикации: `drones/{drone-id}/sensors/{sensor-id}`. Поток проходит через Gazebo Image → ограниченную очередь rawvideo → FFmpeg/libx264 → RTSP с RTP/UDP → MediaMTX. Текущая реализация поддерживает RGB/BGR с тремя каналами и учитывает stride. Частота входа FFmpeg задана как 25 fps.
+Путь публикации: `drones/{drone-id}/sensors/{sensor-id}`. Поток проходит через Gazebo Image → ограниченную очередь rawvideo → FFmpeg/libx264 → RTSP с RTP/UDP → MediaMTX. Текущая реализация поддерживает RGB/BGR с тремя каналами и учитывает stride. Частота входа FFmpeg задана как 25 fps; encoder отправляет H.264 baseline, ключевой кадр раз в секунду и повторяет SPS/PPS, чтобы поздно подключившийся WebRTC-клиент начал декодирование без ожидания длинного GOP.
 
 Первый RTSP-читатель запускает `runOnDemand`, который вызывает camera activate и остаётся запущенным на время demand. Читатели используют одну публикацию; через пять секунд после ухода последнего MediaMTX завершает hook и вызывает deactivate через `runOnUnDemand`. Activate/deactivate доступны также вручную; GET камеры возвращает `active` и `stream_url`.
+
+Для браузера используйте WHEP URL из Backend `GET /api/v1/drones/{public-id}/sensors/{sensor-id}/video`; MediaMTX путь внутри URL построен по Gazebo ID. Compose публикует HTTP-порт `WEBRTC_PORT` и фиксированный ICE UDP-порт `WEBRTC_UDP_PORT`. По умолчанию MediaMTX объявляет только hostnames из `WEBRTC_ADDITIONAL_HOSTS`; укажите там имя/IP, достижимое браузером. `WEBRTC_ALLOWED_ORIGIN` задаёт разрешённый browser origin. MVP не настраивает TURN, поэтому клиент и MediaMTX должны иметь прямую UDP-доступность.
 
 Пример получения одного кадра **в контейнере** после создания дрона:
 
@@ -168,6 +170,7 @@ docker compose exec -T gazebo-service ffmpeg \
 | --- | --- |
 | `WORLD_FILE`, `WORLD_NAME` | SDF из `third-party/worlds` и имя мира внутри него |
 | `API_PORT`, `RTSP_PORT`, `RTP_PORT`, `RTCP_PORT`, `HLS_PORT`, `WEBRTC_PORT`, `WEBRTC_UDP_PORT` | Публикуемые Compose порты |
+| `WEBRTC_ALLOWED_ORIGIN`, `WEBRTC_ADDITIONAL_HOSTS`, `WEBRTC_IPS_FROM_INTERFACES` | Origin браузера и ICE адреса, публикуемые MediaMTX |
 | `GZ_PARTITION` | Изоляция Gazebo Transport |
 | `GZ_RENDER_ENGINE`, `GZ_VERBOSITY` | Рендеринг и уровень логов Gazebo |
 | `STARTUP_TIMEOUT`, `GZ_REQUEST_TIMEOUT_MS`, `SENSOR_SAMPLE_TIMEOUT` | Ожидание старта, запросов и первого кадра камеры |
@@ -216,11 +219,11 @@ docker compose exec -T gazebo-service python /opt/uav/tests/smoke.py
 
 | Проверка | Подтверждённое покрытие |
 | --- | --- |
-| `test_contract.py` | 15 тестов: валидация/API-контракт, сравнение quaternion, декодирование текущего состояния, безопасный отказ reset, инвалидация кеша, частичный отказ PATCH, идемпотентное закрытие SensorSubscription и EncoderSession |
+| `test_contract.py` | 14 тестов: валидация/API-контракт, сравнение quaternion, декодирование текущего состояния, безопасный отказ reset, инвалидация кеша, частичный отказ PATCH, идемпотентное закрытие SensorSubscription и EncoderSession |
 | `regression.py` | Отказ PATCH позы, текущие позы GET/list/world, внешние Transport-изменения и сохранение соседних настроек, реальная частота/reset сенсора, закрытие нескольких WebSocket при reset/delete, восстановление активной камеры, полный world-reset |
 | `smoke.py` | Старт и готовность, pause/resume, создание с начальной позой/reset/delete, sensor WebSocket и rate PATCH, on-demand получение и декодирование H.264 через MediaMTX и остановка публикации, сенсоры x500_gimbal, отказ неподдерживаемого PATCH, world-reset и reboot |
 
-Последний прогон после рефакторинга: 15 unit-тестов прошли; оба контейнерных скрипта прошли; сервис healthy. После reboot оставался один Gazebo и ни одного FFmpeg. Матрица не означает проверку всех отказов: отдельные сценарии аварии FFmpeg, нескольких независимых камер, нескольких одновременных RTSP-читателей и медленного WebSocket-клиента ещё нужно расширить.
+Последний прогон общего Backend в Docker: Gazebo contract **14 passed**, `regression.py` и `smoke.py` прошли. Браузерный Chrome внутри Docker получил и декодировал WHEP H.264 кадр 1280×720; два клиента разделили одну публикацию, уход первого не прервал второго, уход последнего привёл к camera deactivate. Отдельные сценарии аварии FFmpeg, нескольких независимых камер и медленного Backend WebSocket-клиента ещё нужно расширить.
 
 ## Структура приложения
 

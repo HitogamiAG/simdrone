@@ -8,5 +8,5 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
 COPY mediamtx/mediamtx.yml /app/mediamtx.yml
 COPY mediamtx/hook.sh /app/hook.sh
 RUN chmod +x /app/hook.sh
-EXPOSE 8554/tcp 8000/udp 8001/udp 8888/tcp 9997/tcp
+EXPOSE 8554/tcp 8000/udp 8001/udp 8888/tcp 8889/tcp 8189/udp 9997/tcp
 ENTRYPOINT ["/usr/local/bin/mediamtx", "/app/mediamtx.yml"]

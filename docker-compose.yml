@@ -55,6 +55,41 @@ services:
       start_period: 10s
       retries: 3
 
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: uav-platform-backend:local
+    env_file: .env
+    environment:
+      BACKEND_HOST: 0.0.0.0
+      BACKEND_PORT: 8003
+      GAZEBO_API_URL: http://gazebo-service:8000
+      PX4_HUB_API_URL: http://px4-hub:8002
+      MEDIAMTX_API_URL: http://mediamtx:9997
+      MEDIAMTX_WHEP_URL: ${MEDIAMTX_WHEP_URL:-http://localhost:8889}
+      BACKEND_REQUEST_TIMEOUT: ${BACKEND_REQUEST_TIMEOUT:-30}
+      BACKEND_STARTUP_TIMEOUT: ${BACKEND_STARTUP_TIMEOUT:-120}
+      BACKEND_MAX_SUBSCRIPTIONS: ${BACKEND_MAX_SUBSCRIPTIONS:-32}
+    ports:
+      - "${BACKEND_PORT:-8003}:8003"
+    depends_on:
+      gazebo-service:
+        condition: service_healthy
+      px4-hub:
+        condition: service_healthy
+      mediamtx:
+        condition: service_started
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 10s
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8003/healthz"]
+      interval: 10s
+      timeout: 3s
+      start_period: 5s
+      retries: 3
+
   mediamtx:
     build:
       context: .
@@ -65,10 +100,15 @@ services:
       - "${RTP_PORT:-8000}:8000/udp"
       - "${RTCP_PORT:-8001}:8001/udp"
       - "${HLS_PORT:-8888}:8888/tcp"
+      - "${WEBRTC_PORT:-8889}:8889/tcp"
+      - "${WEBRTC_UDP_PORT:-8189}:8189/udp"
     expose:
       - "9997"
     environment:
       API_BASE: http://gazebo-service:8000
+      MTX_WEBRTCALLOWORIGIN: ${WEBRTC_ALLOWED_ORIGIN:-http://localhost:3000}
+      MTX_WEBRTCADDITIONALHOSTS: ${WEBRTC_ADDITIONAL_HOSTS:-localhost,mediamtx}
+      MTX_WEBRTCIPSFROMINTERFACES: ${WEBRTC_IPS_FROM_INTERFACES:-no}
     restart: unless-stopped
     init: true
     stop_grace_period: 5s

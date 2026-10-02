@@ -1,0 +1,10 @@
+FROM mcr.microsoft.com/playwright:v1.52.0-noble@sha256:a021500a801bab0611049217ffad6b9697d827205c15babb86a53bc1a61c02d5
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl gnupg && \
+    curl -fsSL https://dl.google.com/linux/linux_signing_key.pub | gpg --dearmor -o /usr/share/keyrings/google-chrome.gpg && \
+    echo "deb [arch=amd64 signed-by=/usr/share/keyrings/google-chrome.gpg] https://dl.google.com/linux/chrome/deb/ stable main" > /etc/apt/sources.list.d/google-chrome.list && \
+    apt-get update && apt-get install -y --no-install-recommends google-chrome-stable=154.0.8037.97-1 && \
+    rm -rf /var/lib/apt/lists/*
+RUN npm install --prefix /opt/browser-test playwright@1.52.0
+ENV NODE_PATH=/opt/browser-test/node_modules
+COPY webrtc_browser.js /opt/browser-test/webrtc_browser.js
+CMD ["node", "/opt/browser-test/webrtc_browser.js"]

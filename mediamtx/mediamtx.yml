@@ -30,7 +30,11 @@ metrics: no
 pprof: no
 hls: yes
 hlsAddress: :8888
-webrtc: no
+webrtc: yes
+webrtcAddress: :8889
+webrtcLocalUDPAddress: :8189
+webrtcAllowOrigin: http://localhost:3000
+webrtcAdditionalHosts: [localhost]
 srt: no
 paths:
   '~^drones/([^/]+)/sensors/([^/]+)$':

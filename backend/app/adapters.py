@@ -1,0 +1,63 @@
+import httpx
+from .errors import BackendError
+
+
+class ServiceApi:
+    def __init__(self, base_url, timeout):
+        self.client = httpx.AsyncClient(base_url=base_url.rstrip("/"), timeout=timeout)
+
+    async def close(self):
+        await self.client.aclose()
+
+    async def call(self, method, path, *, json=None, missing="resource_not_found"):
+        try:
+            response = await self.client.request(method, path, json=json)
+        except httpx.HTTPError as exc:
+            raise BackendError(503, "dependency_unavailable", "A platform service is unavailable",
+                               {"service": str(self.client.base_url), "reason": str(exc)}) from exc
+        try:
+            payload = response.json()
+        except ValueError:
+            payload = {"message": response.text[:1000]}
+        if response.status_code == 404:
+            raise BackendError(404, missing, "Resource was not found", payload)
+        if response.status_code == 409:
+            err = payload.get("error", {})
+            raise BackendError(409, err.get("code", "operation_conflict"),
+                               err.get("message", "Operation conflicts with current state"), err.get("details"))
+        if response.is_error:
+            err = payload.get("error", {})
+            raise BackendError(response.status_code if response.status_code < 500 else 503,
+                               err.get("code", "upstream_error"), err.get("message", "Upstream request failed"),
+                               {"upstream_status": response.status_code, "upstream_details": err.get("details", payload)})
+        return payload
+
+
+class GazeboApi(ServiceApi):
+    async def world(self): return await self.call("GET", "/api/v1/world")
+    async def drones(self): return await self.call("GET", "/api/v1/drones/")
+    async def drone(self, drone_id): return await self.call("GET", f"/api/v1/drones/{drone_id}/", missing="drone_not_found")
+    async def create_drone(self, body): return await self.call("POST", "/api/v1/drones/", json=body)
+    async def delete_drone(self, drone_id): return await self.call("DELETE", f"/api/v1/drones/{drone_id}/", missing="drone_not_found")
+    async def reset_drone(self, drone_id): return await self.call("POST", f"/api/v1/drones/{drone_id}/reset", missing="drone_not_found")
+    async def world_reset(self): return await self.call("POST", "/api/v1/world/world-reset")
+    async def reboot(self): return await self.call("POST", "/api/v1/server/server-reboot/")
+    async def patch_world(self, body): return await self.call("PATCH", "/api/v1/world", json=body)
+    async def pause(self): return await self.call("POST", "/api/v1/world/pause")
+    async def resume(self): return await self.call("POST", "/api/v1/world/resume")
+    async def sensors(self, drone_id): return await self.call("GET", f"/api/v1/drones/{drone_id}/sensors/", missing="drone_not_found")
+    async def sensor(self, drone_id, sensor_id): return await self.call("GET", f"/api/v1/drones/{drone_id}/sensors/{sensor_id}/", missing="sensor_not_found")
+    async def patch_sensor(self, drone_id, sensor_id, body): return await self.call("PATCH", f"/api/v1/drones/{drone_id}/sensors/{sensor_id}/", json=body, missing="sensor_not_found")
+    async def reset_sensor(self, drone_id, sensor_id): return await self.call("POST", f"/api/v1/drones/{drone_id}/sensors/{sensor_id}/reset", missing="sensor_not_found")
+
+
+class HubApi(ServiceApi):
+    async def instances(self): return await self.call("GET", "/api/v1/instances/")
+    async def create(self, drone_id): return await self.call("POST", "/api/v1/instances/", json={"drone_id": drone_id})
+    async def get(self, instance_id): return await self.call("GET", f"/api/v1/instances/{instance_id}/", missing="autopilot_not_found")
+    async def delete(self, instance_id): return await self.call("DELETE", f"/api/v1/instances/{instance_id}/", missing="autopilot_not_found")
+    async def start(self, instance_id): return await self.call("POST", f"/api/v1/instances/{instance_id}/start")
+    async def stop(self, instance_id): return await self.call("POST", f"/api/v1/instances/{instance_id}/stop")
+    async def restart(self, instance_id): return await self.call("POST", f"/api/v1/instances/{instance_id}/restart")
+    async def parameters(self, instance_id): return await self.call("GET", f"/api/v1/instances/{instance_id}/parameters/")
+    async def patch_parameters(self, instance_id, body): return await self.call("PATCH", f"/api/v1/instances/{instance_id}/parameters/", json=body)

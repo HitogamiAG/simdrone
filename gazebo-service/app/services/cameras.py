@@ -48,7 +48,7 @@ class CamerasOperations(ServiceContext):
             raise ApiFault(422, "unsupported_pixel_format", f"Unsupported image pixel format: {pixel}")
         self.settings.media_dir.mkdir(parents=True, exist_ok=True)
         path = f"drones/{drone_id}/sensors/{sensor_name}"
-        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "warning", "-f", "rawvideo", "-pixel_format", "rgb24" if pixel == 3 else "bgr24", "-video_size", f"{width}x{height}", "-framerate", "25", "-i", "pipe:0", "-an", "-c:v", "libx264", "-preset", self.settings.ffmpeg_preset, "-tune", "zerolatency", "-f", "rtsp", "-rtsp_transport", "udp", f"rtsp://mediamtx:8554/{path}"]
+        cmd = ["ffmpeg", "-hide_banner", "-loglevel", "warning", "-f", "rawvideo", "-pixel_format", "rgb24" if pixel == 3 else "bgr24", "-video_size", f"{width}x{height}", "-framerate", "25", "-i", "pipe:0", "-an", "-c:v", "libx264", "-profile:v", "baseline", "-level", "3.1", "-pix_fmt", "yuv420p", "-preset", self.settings.ffmpeg_preset, "-tune", "zerolatency", "-g", "25", "-keyint_min", "25", "-sc_threshold", "0", "-x264-params", "repeat-headers=1", "-f", "rtsp", "-rtsp_transport", "udp", f"rtsp://mediamtx:8554/{path}"]
         session = EncoderSession(self.world, sensor, image_cls, cmd, width, height, pixel,
                                  self._publish_sample)
         try:
