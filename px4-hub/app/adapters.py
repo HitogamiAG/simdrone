@@ -38,7 +38,10 @@ class Px4Adapter:
         record.telemetry = TelemetryFanout(record.system, record.id)
         record.telemetry.start()
         try:
-            await asyncio.wait_for(record.telemetry.position_received.wait(), self.settings.startup_timeout)
+            await asyncio.wait_for(asyncio.gather(
+                record.telemetry.connection_received.wait(),
+                record.telemetry.position_received.wait(),
+            ), self.settings.startup_timeout)
         except asyncio.TimeoutError as exc:
             raise TimeoutError("PX4 did not produce position telemetry before startup timeout") from exc
         if record.px4_process.returncode is not None or record.mavsdk_process.returncode is not None:

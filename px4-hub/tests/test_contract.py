@@ -83,15 +83,15 @@ def test_telemetry_fanout_is_per_client_and_bounded():
     async def run():
         fanout = TelemetryFanout(object(), "i1")
         first, second = fanout.subscribe(), fanout.subscribe()
-        for value in range(12):
-            message = {"instance_id": "i1", "type": "position", "data": {"x": value}}
-            for queue in tuple(fanout.clients):
-                if queue.full():
-                    queue.get_nowait()
-                queue.put_nowait(message)
-        assert first.qsize() == second.qsize() == len(__import__("app.telemetry", fromlist=["STREAMS"]).STREAMS)
-        assert (await first.get())["data"]["x"] == 3
-        assert (await second.get())["data"]["x"] == 3
+        async def samples():
+            for value in range(12):
+                yield value
+        await fanout._pump("health", samples())
+        await fanout._pump("position", samples())
+        assert first.qsize() == second.qsize() == 2
+        assert (await first.get())["type"] == "health"
+        assert (await first.get())["data"] == 11
+        assert (await second.get())["data"] == 11
         fanout.unsubscribe(first)
         assert len(fanout.clients) == 1
 

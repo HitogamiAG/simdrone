@@ -72,7 +72,7 @@ async def telemetry(instance_id: str, websocket: WebSocket):
                 message = await asyncio.wait_for(queue.get(), timeout=0.2)
             except asyncio.TimeoutError:
                 continue
-            if record.telemetry is not fanout or fanout.closed:
+            if message is None or record.telemetry is not fanout or fanout.closed:
                 continue
             await websocket.send_json(message)
 

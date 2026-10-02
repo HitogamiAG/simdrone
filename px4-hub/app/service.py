@@ -16,9 +16,12 @@ class Instance:
     gazebo_model: str
     entity_id: int | None
     slot: int
+    world: str
     workdir: Path
     status: str = "starting"
     last_error: str | None = None
+    binding_valid: bool | None = True
+    binding_error: str | None = None
     px4_process: asyncio.subprocess.Process | None = None
     mavsdk_process: asyncio.subprocess.Process | None = None
     system: object | None = None
@@ -69,20 +72,31 @@ class InstanceService:
 
     async def _poll_gazebo(self):
         while not self.closed:
-            try:
-                self.world_name, self.simulation_paused = await self.gazebo.simulation()
-                self.gazebo_available = True
-                for record in list(self.instances.values()):
-                    try:
-                        drone = await self.gazebo.drone(record.drone_id)
-                        if drone.get("entity_id") != record.entity_id:
-                            record.last_error = "Gazebo entity changed; backend coordination is required"
-                    except HubError:
-                        record.last_error = "Gazebo model is missing; backend coordination is required"
-            except Exception:
-                self.gazebo_available = False
-                self.simulation_paused = None
+            await self._refresh_gazebo()
             await asyncio.sleep(self.settings.poll_interval)
+
+    async def _refresh_gazebo(self):
+        try:
+            self.world_name, self.simulation_paused = await self.gazebo.simulation()
+            self.gazebo_available = True
+        except Exception:
+            self.gazebo_available = False
+            self.simulation_paused = None
+            for record in list(self.instances.values()):
+                record.binding_valid = None
+                record.binding_error = "Gazebo unavailable; binding cannot be observed"
+            return
+        for record in list(self.instances.values()):
+            try:
+                drone = await self.gazebo.drone(record.drone_id)
+                valid = (self.world_name == record.world and drone.get("entity_id") == record.entity_id
+                         and drone.get("name") == record.gazebo_model and drone.get("model") == "x500_gimbal")
+                record.binding_valid = valid
+                record.binding_error = None if valid else "Gazebo binding changed; backend coordination is required"
+            except HubError as exc:
+                record.binding_valid = False if exc.status == 404 else None
+                record.binding_error = ("Gazebo model is missing; backend coordination is required"
+                                        if exc.status == 404 else "Gazebo binding cannot be observed")
 
     async def list(self):
         async with self.lock:
@@ -107,7 +121,7 @@ class InstanceService:
                 raise HubError(409, "instance_limit", "PX4 instance limit reached", {"limit": self.settings.max_instances})
             instance_id = str(uuid.uuid4())
             workdir = self.settings.instance_dir / instance_id
-            record = Instance(instance_id, drone_id, drone["name"], drone.get("entity_id"), slot, workdir)
+            record = Instance(instance_id, drone_id, drone["name"], drone.get("entity_id"), slot, self.world_name, workdir)
             self.instances[instance_id] = record
         async with record.operation_lock:
             try:
@@ -213,10 +227,11 @@ class InstanceService:
         try:
             self.world_name, paused = await self.gazebo.simulation()
         except HubError:
+            self.gazebo_available, self.simulation_paused = False, None
             raise
+        self.gazebo_available, self.simulation_paused = True, paused
         if paused:
             raise HubError(409, "simulation_paused", "PX4 startup and parameter changes require a running simulation")
-        self.gazebo_available, self.simulation_paused = True, False
 
     async def _start_record(self, record):
         record.status, record.last_error = "starting", None
@@ -258,21 +273,27 @@ class InstanceService:
         now = asyncio.get_running_loop().time()
         latest = record.telemetry.latest if record.telemetry else {}
         health = latest.get("health", {})
-        fresh = bool(record.telemetry and record.telemetry.last_received is not None and now - record.telemetry.last_received <= self.settings.telemetry_stale_after)
+        ages = {name: max(0.0, now - received) for name, received in
+                (record.telemetry.received_by_type.items() if record.telemetry else [])}
+        freshness = {name: age <= self.settings.telemetry_stale_after for name, age in ages.items()}
+        fresh = freshness.get("position", False)
+        connected = record.telemetry.connected if record.telemetry else False
         process_alive = bool(record.px4_process and record.px4_process.returncode is None and record.mavsdk_process and record.mavsdk_process.returncode is None)
         return {
             "id": record.id, "status": record.status,
             "process": {"px4_pid": record.px4_process.pid if record.px4_process else None,
                         "mavsdk_pid": record.mavsdk_process.pid if record.mavsdk_process else None,
                         "instance_id": record.slot, "alive": process_alive},
-            "binding": {"world": self.world_name, "drone_id": record.drone_id,
+            "binding": {"world": record.world, "drone_id": record.drone_id,
                         "gazebo_model": record.gazebo_model, "entity_id": record.entity_id,
-                        "valid": record.last_error is None},
+                        "valid": record.binding_valid, "error": record.binding_error},
             "px4": {"system_id": record.slot + 1, "airframe": 4019,
-                    "connected": bool(record.system and fresh), "telemetry_fresh": fresh,
+                    "connected": connected, "telemetry_fresh": fresh,
                     "health": health,
-                    "ready_to_arm": bool(health and health.get("is_global_position_ok") and health.get("is_home_position_ok"))},
-            "mavlink": {"connected": bool(record.system and fresh), "udp_port": record.udp_port,
+                    "telemetry_age_seconds": ages, "telemetry_fresh_by_type": freshness,
+                    "stream_errors": record.telemetry.stream_errors if record.telemetry else {},
+                    "ready_to_arm": bool(connected and freshness.get("health", False) and health.get("is_armable"))},
+            "mavlink": {"connected": connected, "udp_port": record.udp_port,
                          "grpc_port": record.grpc_port},
             "dependencies": {"gazebo_available": self.gazebo_available,
                              "simulation_paused": self.simulation_paused},
