@@ -65,15 +65,9 @@ async def telemetry(instance_id: str, websocket: WebSocket):
     queue = fanout.subscribe()
     async def send_samples():
         while True:
-            if record.status != "running" or record.telemetry is not fanout or fanout.closed:
-                await websocket.close(code=1012, reason="PX4 telemetry generation stopped")
-                return
-            try:
-                message = await asyncio.wait_for(queue.get(), timeout=0.2)
-            except asyncio.TimeoutError:
-                continue
+            message = await queue.get()
             if message is None or record.telemetry is not fanout or fanout.closed:
-                continue
+                return
             await websocket.send_json(message)
 
     async def receive_disconnect():
@@ -81,11 +75,22 @@ async def telemetry(instance_id: str, websocket: WebSocket):
             if (await websocket.receive())["type"] == "websocket.disconnect":
                 return
 
-    tasks = [asyncio.create_task(send_samples()), asyncio.create_task(receive_disconnect())]
+    async def generation_ended():
+        while record.status == "running" and record.telemetry is fanout and not fanout.closed:
+            await asyncio.sleep(0.2)
+
+    generation = asyncio.create_task(generation_ended())
+    tasks = [asyncio.create_task(send_samples()), asyncio.create_task(receive_disconnect()), generation]
     try:
         done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
         for task in done:
             task.result()
+        if generation in done or fanout.closed or record.telemetry is not fanout:
+            await websocket.close(code=1012, reason="PX4 telemetry generation stopped")
     except WebSocketDisconnect:
         pass
     finally:

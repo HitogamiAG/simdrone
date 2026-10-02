@@ -163,3 +163,41 @@ def test_websocket_closes_on_fast_generation_change():
             else:
                 raise AssertionError("old generation survived restart")
     assert not old.clients
+
+
+def test_restart_closes_websocket_even_when_network_send_is_blocked():
+    import asyncio
+    from app.api import telemetry
+
+    async def run():
+        fanout = TelemetryFanout(object(), 'id')
+        record = SimpleNamespace(status='running', telemetry=fanout)
+        service = SimpleNamespace(_get_running=lambda _: record)
+        sending = asyncio.Event()
+        closed = []
+
+        class Socket:
+            app = SimpleNamespace(state=SimpleNamespace(service=service))
+
+            async def accept(self):
+                pass
+
+            async def send_json(self, sample):
+                sending.set()
+                await asyncio.Event().wait()
+
+            async def receive(self):
+                await asyncio.Event().wait()
+
+            async def close(self, **kwargs):
+                closed.append(kwargs['code'])
+
+        task = asyncio.create_task(telemetry('id', Socket()))
+        await asyncio.sleep(0)
+        for queue in fanout.clients:
+            queue.put({'type': 'position', 'data': 1})
+        await sending.wait()
+        record.telemetry = TelemetryFanout(object(), 'id')
+        await asyncio.wait_for(task, 1)
+        assert closed == [1012] and not fanout.clients
+    asyncio.run(run())
