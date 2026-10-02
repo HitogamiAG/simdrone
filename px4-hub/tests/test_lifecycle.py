@@ -120,6 +120,26 @@ def test_start_failure_and_failed_restart_release_processes(tmp_path):
     asyncio.run(run())
 
 
+def test_stop_start_preserves_instance_slot_and_parameter_directory(tmp_path):
+    async def run():
+        hub = service(tmp_path)
+        created = await hub.create('d0', 'x500_gimbal')
+        record = hub.instances[created['id']]
+        marker = record.workdir / 'parameters.marker'
+        marker.write_text('persist')
+        stopped = await hub.stop(record.id)
+        assert stopped['status'] == 'stopped'
+        assert record.system is None and record.px4_process is None
+        assert marker.read_text() == 'persist'
+        assert (await hub.stop(record.id))['status'] == 'stopped'
+        started = await hub.start_instance(record.id)
+        assert started['id'] == created['id'] and started['status'] == 'running'
+        assert marker.read_text() == 'persist'
+        assert (await hub.start_instance(record.id))['status'] == 'running'
+        await hub.shutdown()
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize('operation', ['delete', 'restart'])
 def test_parameter_change_serialized_with_lifecycle(tmp_path, operation):
     async def run():

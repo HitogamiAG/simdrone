@@ -4,7 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 import pytest
 
-from app.api.schemas import DronePatch, WorldPatch
+from app.api.schemas import WorldPatch
 from app.geometry import Pose, Quaternion, Vector3
 from app.main import app, create_app
 from app.errors import ApiFault
@@ -38,20 +38,13 @@ def test_world_patch_rejects_unsupported_magnetic_field():
     raise AssertionError("unsupported field should fail validation")
 
 
-def test_drone_patch_does_not_accept_velocity_fields():
-    try:
-        DronePatch.model_validate({"linear_velocity": {"x": 1, "y": 0, "z": 0}, "pose": {"position": {"x": 0, "y": 0, "z": 0}, "orientation": {"x": 0, "y": 0, "z": 0, "w": 1}}})
-    except ValueError:
-        return
-    raise AssertionError("velocity fields should be rejected")
-
-
 def test_openapi_contains_public_endpoints():
     schema = app.openapi()
     paths = schema["paths"]
     assert "/api/v1/world" in paths
     assert any(getattr(route, "path", "") == "/api/v1/drones/{drone_id}/sensors/{sensor_id}/stream" for route in app.routes)
     assert "/api/v1/world/list" not in paths
+    assert "patch" not in paths["/api/v1/drones/{drone_id}/"]
 
 
 def test_api_fault_uses_common_error_format(monkeypatch):

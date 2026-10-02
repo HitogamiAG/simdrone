@@ -35,7 +35,7 @@ Compose проверяет `/healthz`, ожидая запуска мира. `se
 | POST | `/api/v1/world/pause` | Пауза симуляции |
 | POST | `/api/v1/world/resume` | Возобновление симуляции |
 | GET / POST | `/api/v1/drones/` | Список / создание дрона |
-| GET / PATCH / DELETE | `/api/v1/drones/{drone-id}/` | Чтение / изменение позы / удаление |
+| GET / DELETE | `/api/v1/drones/{drone-id}/` | Чтение актуального состояния / удаление |
 | POST | `/api/v1/drones/{drone-id}/reset` | Восстановление начального состояния дрона |
 | GET | `/api/v1/drones/{drone-id}/sensors/` | Список сенсоров |
 | GET / PATCH | `/api/v1/drones/{drone-id}/sensors/{sensor-id}/` | Чтение / изменение частоты |
@@ -97,9 +97,7 @@ PATCH мира не является транзакцией. Если поздн
 
 `model` — ключ установленного каталога; произвольные пути и загрузка SDF через API не принимаются. Имя и поза необязательны: по умолчанию генерируется имя, позиция равна `(0,0,1)`, ориентация единичная. Поставляются `test_quad`, `x500_gimbal` и модели из закреплённого PX4-gazebo-models.
 
-PATCH принимает только `pose` в том же формате. Позиция задаётся в метрах в системе мира, quaternion — в порядке `x,y,z,w`. Числа должны быть конечными, quaternion нормализуется; нулевой quaternion отклоняется. Скорости через PATCH не изменяются.
-
-PATCH вызывает `set_pose`, временно приостанавливает работающий мир и проверяет **позицию и ориентацию** по `pose/info`. Gazebo entity-id сохраняется; удаление и пересоздание в PATCH не выполняются. При неподтверждённом результате возвращается таймаут. GET дрона, список и позы моделей в GET мира также используют текущие позы, а не закешированную позу из `scene/info`.
+Поза задаётся при создании и сохраняется как начальная поза для drone-reset. Публичного перемещения существующего дрона нет: после создания им управляет симуляция. GET дрона, список и позы моделей в GET мира используют актуальные позы из Gazebo.
 
 ### Сенсоры и WebSocket
 
@@ -136,7 +134,7 @@ ws://localhost:8000/api/v1/drones/{drone-id}/sensors/imu_sensor/stream
 
 | Операция | Результат |
 | --- | --- |
-| Drone PATCH | Меняет позу, сохраняет API-id и Gazebo entity-id; не сбрасывает модель |
+| Drone pose | Задаётся только при создании; текущая поза изменяется симуляцией, reset возвращает модель в начальную точку |
 | Drone-reset | Удаляет модель и создаёт из сохранённого начального SDF и позы; API-id сохраняется, entity-id меняется. Физическое состояние и состояния плагинов создаются заново |
 | Sensor-reset | Восстанавливает исходную частоту, очищает кеш и инвалидирует старые сообщения очереди; не сбрасывает шум, bias и калибровку |
 | DELETE дрона | Останавливает камеры, снимает подписки, закрывает WebSocket и удаляет модель |
@@ -169,7 +167,7 @@ docker compose exec -T gazebo-service ffmpeg \
 | Параметры | Назначение |
 | --- | --- |
 | `WORLD_FILE`, `WORLD_NAME` | SDF из `third-party/worlds` и имя мира внутри него |
-| `API_PORT`, `RTSP_PORT`, `RTP_PORT`, `RTCP_PORT`, `HLS_PORT` | Публикуемые Compose порты |
+| `API_PORT`, `RTSP_PORT`, `RTP_PORT`, `RTCP_PORT`, `HLS_PORT`, `WEBRTC_PORT`, `WEBRTC_UDP_PORT` | Публикуемые Compose порты |
 | `GZ_PARTITION` | Изоляция Gazebo Transport |
 | `GZ_RENDER_ENGINE`, `GZ_VERBOSITY` | Рендеринг и уровень логов Gazebo |
 | `STARTUP_TIMEOUT`, `GZ_REQUEST_TIMEOUT_MS`, `SENSOR_SAMPLE_TIMEOUT` | Ожидание старта, запросов и первого кадра камеры |
@@ -219,8 +217,8 @@ docker compose exec -T gazebo-service python /opt/uav/tests/smoke.py
 | Проверка | Подтверждённое покрытие |
 | --- | --- |
 | `test_contract.py` | 15 тестов: валидация/API-контракт, сравнение quaternion, декодирование текущего состояния, безопасный отказ reset, инвалидация кеша, частичный отказ PATCH, идемпотентное закрытие SensorSubscription и EncoderSession |
-| `regression.py` | Position/orientation PATCH без смены entity-id, текущие позы GET/list/world, внешние Transport-изменения и сохранение соседних настроек, реальная частота/reset сенсора, закрытие нескольких WebSocket при reset/delete, восстановление активной камеры, полный world-reset |
-| `smoke.py` | Старт и готовность, pause/resume, дрон pose/reset/delete, sensor WebSocket и rate PATCH, on-demand получение и декодирование H.264 через MediaMTX и остановка публикации, сенсоры x500_gimbal, отказ неподдерживаемого PATCH, world-reset и reboot |
+| `regression.py` | Отказ PATCH позы, текущие позы GET/list/world, внешние Transport-изменения и сохранение соседних настроек, реальная частота/reset сенсора, закрытие нескольких WebSocket при reset/delete, восстановление активной камеры, полный world-reset |
+| `smoke.py` | Старт и готовность, pause/resume, создание с начальной позой/reset/delete, sensor WebSocket и rate PATCH, on-demand получение и декодирование H.264 через MediaMTX и остановка публикации, сенсоры x500_gimbal, отказ неподдерживаемого PATCH, world-reset и reboot |
 
 Последний прогон после рефакторинга: 15 unit-тестов прошли; оба контейнерных скрипта прошли; сервис healthy. После reboot оставался один Gazebo и ни одного FFmpeg. Матрица не означает проверку всех отказов: отдельные сценарии аварии FFmpeg, нескольких независимых камер, нескольких одновременных RTSP-читателей и медленного WebSocket-клиента ещё нужно расширить.
 

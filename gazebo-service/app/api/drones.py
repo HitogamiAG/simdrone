@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Request
-from .schemas import DroneCreate, DronePatch
+from .schemas import DroneCreate
 
 router = APIRouter()
 
@@ -11,9 +11,6 @@ def create_drone(body: DroneCreate, request: Request): return request.app.state.
 
 @router.get("/api/v1/drones/{drone_id}/")
 def get_drone(drone_id: str, request: Request): return request.app.state.runtime.get_drone(drone_id)
-
-@router.patch("/api/v1/drones/{drone_id}/")
-def patch_drone(drone_id: str, body: DronePatch, request: Request): return request.app.state.runtime.patch_drone(drone_id, body)
 
 @router.post("/api/v1/drones/{drone_id}/reset")
 def reset_drone(drone_id: str, request: Request): return request.app.state.runtime.reset_drone(drone_id)

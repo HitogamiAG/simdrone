@@ -6,7 +6,7 @@ from ..config import ROOT, LOCAL_ROOT
 from ..errors import ApiFault
 from ..geometry import Pose, Quaternion, Vector3
 from ..entities import DroneRecord, SensorRecord
-from ..api.schemas import DroneCreate, DronePatch, SensorPatch, WorldPatch
+from ..api.schemas import DroneCreate, SensorPatch, WorldPatch
 from ..gazebo.state import SerializedStepMap, decode_world, model_sdf
 from .common import serialized, proto_dict, _settings_match
 log = logging.getLogger("gazebo-service")

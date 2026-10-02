@@ -6,7 +6,7 @@ from ..config import ROOT, LOCAL_ROOT
 from ..errors import ApiFault
 from ..geometry import Pose, Quaternion, Vector3
 from ..entities import DroneRecord, SensorRecord
-from ..api.schemas import DroneCreate, DronePatch, SensorPatch, WorldPatch
+from ..api.schemas import DroneCreate, SensorPatch, WorldPatch
 from ..gazebo.state import SerializedStepMap, decode_world, model_sdf
 from .common import serialized, proto_dict
 log = logging.getLogger("gazebo-service")
@@ -78,13 +78,6 @@ class DronesOperations(ServiceContext):
             time.sleep(.1)
         raise ApiFault(504, "gazebo_timeout", f"Model {name} did not appear in Gazebo")
 
-    @staticmethod
-    def _fill_pose(proto, pose):
-        proto.name = ""
-        proto.position.x, proto.position.y, proto.position.z = pose.position.values()
-        proto.orientation.x, proto.orientation.y = pose.orientation.x, pose.orientation.y
-        proto.orientation.z, proto.orientation.w = pose.orientation.z, pose.orientation.w
-
     @serialized
     def get_drone(self, drone_id):
         rec = self._record(drone_id)
@@ -95,37 +88,6 @@ class DronesOperations(ServiceContext):
         rec.pose = self._current_pose(model.id)
         self._refresh_sensors(rec.id, rec.name)
         return self._drone_json(rec)
-
-    @serialized
-    def patch_drone(self, drone_id, body: DronePatch):
-        self._ensure_ready()
-        before = self._snapshot().stats.paused
-        try:
-            if not before:
-                self.set_paused(True)
-            return self._set_drone_pose(drone_id, body)
-        finally:
-            if not before:
-                self.set_paused(False)
-
-    def _set_drone_pose(self, drone_id, body):
-        self.get_drone(drone_id)
-        rec = self._record(drone_id)
-        pose = self.world.message_type("Pose")()
-        self._fill_pose(pose, body.pose)
-        pose.id, pose.name = rec.entity_id, rec.name
-        with self.pose_condition:
-            sequence = self.pose_sequence
-        self.world.set_pose(pose)
-        deadline = time.monotonic() + 5
-        while time.monotonic() < deadline:
-            actual = self._current_pose(rec.entity_id, after=sequence, timeout=max(.01, deadline-time.monotonic()))
-            if self._pose_matches(actual, body.pose):
-                rec.pose = actual
-                return self._drone_json(rec)
-            with self.pose_condition:
-                sequence = self.pose_sequence
-        raise ApiFault(504, "pose_timeout", "Gazebo did not apply the requested position and orientation", {"entity_id": rec.entity_id, "requested": body.pose.model_dump()})
 
     def _retire_drone_sensors(self, drone_id, reason):
         for sensor in list(self.sensors.values()):

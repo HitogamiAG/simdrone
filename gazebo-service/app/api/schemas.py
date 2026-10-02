@@ -10,9 +10,6 @@ class DroneCreate(BaseModel):
     pose: Pose = Field(default_factory=lambda: Pose(
         position=Vector3(x=0, y=0, z=1), orientation=Quaternion(x=0, y=0, z=0, w=1)
     ))
-class DronePatch(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    pose: Pose
 class SensorPatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
     update_rate: float

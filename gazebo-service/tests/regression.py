@@ -53,22 +53,15 @@ async def main():
         did = d["id"]
         path = f"/api/v1/drones/{did}/"
         entity_id = d["entity_id"]
-        requested = pose(2, 1, 4, .8)
-        changed = await checked(c, "PATCH", path, json={"pose": requested})
+        rejected = await c.patch(path, json={"pose": pose(2, 1, 4, .8)})
+        assert rejected.status_code == 405
+        changed = await checked(c, "GET", path)
         assert changed["entity_id"] == entity_id
-        for k in ("x", "y", "z"):
-            assert abs(changed["pose"]["position"][k] - requested["position"][k]) < .02
-        assert abs(changed["pose"]["orientation"]["z"] - requested["orientation"]["z"]) < .005
-        # Orientation-only PATCH must wait for a real rotation, preserving the entity.
-        requested = pose(2, 1, 4, -1.2)
-        changed = await checked(c, "PATCH", path, json={"pose": requested})
-        assert changed["entity_id"] == entity_id
-        assert abs(changed["pose"]["orientation"]["z"] - requested["orientation"]["z"]) < .005
         listed = await checked(c, "GET", "/api/v1/drones/")
         assert listed[0]["pose"] == changed["pose"]
         world = await checked(c, "GET", "/api/v1/world")
         assert next(m for m in world["models"] if m["name"] == d["name"])["pose"] == changed["pose"]
-        print("PASS pose: position, quaternion, live GET/list/world, unchanged entity-id", flush=True)
+        print("PASS drone pose: PATCH removed; create pose and live GET/list/world remain", flush=True)
 
         # External Transport changes must be visible, and partial API PATCH must preserve them.
         w = World("empty", timeout_ms=6000)

@@ -165,6 +165,38 @@ class InstanceService:
                 raise HubError(503, "restart_failed", "PX4 instance failed to restart", str(exc)) from exc
         return self.serialize(record)
 
+    async def stop(self, instance_id):
+        record = self._get(instance_id)
+        async with record.operation_lock:
+            if self.instances.get(instance_id) is not record:
+                raise HubError(404, "instance_not_found", "PX4 instance does not exist")
+            if record.status == "stopped":
+                return self.serialize(record)
+            if record.monitor:
+                record.monitor.cancel()
+                await asyncio.gather(record.monitor, return_exceptions=True)
+                record.monitor = None
+            await self.px4.stop(record)
+            record.status, record.last_error = "stopped", None
+        return self.serialize(record)
+
+    async def start_instance(self, instance_id):
+        record = self._get(instance_id)
+        async with record.operation_lock:
+            if self.instances.get(instance_id) is not record:
+                raise HubError(404, "instance_not_found", "PX4 instance does not exist")
+            if record.status == "running":
+                return self.serialize(record)
+            if record.status not in {"stopped", "failed"}:
+                raise HubError(409, "instance_not_startable", "PX4 instance cannot be started", {"status": record.status})
+            await self._require_running_world()
+            try:
+                await self._start_record(record)
+            except Exception as exc:
+                record.status, record.last_error = "failed", str(exc)
+                raise HubError(503, "start_failed", "PX4 instance failed to start", str(exc)) from exc
+        return self.serialize(record)
+
     async def delete(self, instance_id):
         record = self._get(instance_id)
         async with record.operation_lock:

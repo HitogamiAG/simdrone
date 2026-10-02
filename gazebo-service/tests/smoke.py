@@ -35,7 +35,7 @@ async def main():
         drone_id = drone["id"]
         assert (await client.get(f"/api/v1/drones/{drone_id}/")).status_code == 200
         patched = await client.patch(f"/api/v1/drones/{drone_id}/", json={"pose": {"position": {"x": 2, "y": 1, "z": 3}, "orientation": {"x": 0, "y": 0, "z": 0, "w": 1}}})
-        assert patched.status_code == 200, patched.text
+        assert patched.status_code == 405, patched.text
         sensor_list = (await client.get(f"/api/v1/drones/{drone_id}/sensors/")).json()
         assert any(s["id"] == "imu_sensor" for s in sensor_list), sensor_list
         assert any(s["id"] == "forward_camera" for s in sensor_list), sensor_list
@@ -89,7 +89,7 @@ async def main():
         after_reboot = (await client.get("/api/v1/server/server-alive/")).json()
         assert after_reboot["process_alive"] and after_reboot["world_ready"]
         assert before_reboot["pid"] != after_reboot["pid"]
-        print("Docker smoke test passed: world, drone pose/reset, sensor stream/rate, H.264 RTSP")
+        print("Docker smoke test passed: world, initial drone pose/reset, sensor stream/rate, H.264 RTSP")
 
 
 if __name__ == "__main__":

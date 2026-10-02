@@ -39,6 +39,16 @@ async def restart_instance(instance_id: str, request: Request):
     return await request.app.state.service.restart(instance_id)
 
 
+@router.post("/api/v1/instances/{instance_id}/stop")
+async def stop_instance(instance_id: str, request: Request):
+    return await request.app.state.service.stop(instance_id)
+
+
+@router.post("/api/v1/instances/{instance_id}/start")
+async def start_instance(instance_id: str, request: Request):
+    return await request.app.state.service.start_instance(instance_id)
+
+
 @router.get("/api/v1/instances/{instance_id}/parameters/")
 async def get_parameters(instance_id: str, request: Request):
     return await request.app.state.service.get_parameters(instance_id)
