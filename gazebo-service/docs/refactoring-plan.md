@@ -1,6 +1,6 @@
 # План рефакторинга `app/main.py`
 
-Статус: реализован; контейнерная проверка пройдена 2026-10-02. `main.py` сокращён до app factory/lifespan, глобальный `sim` удалён. Разделены Settings, схемы и entity state, routers, четыре доменных сервиса, SensorHub, EncoderSession, GazeboClient, GazeboProcess, PoseTracker и ModelCatalog.
+Статус: частично реализован; проверка 2026-10-02 выявила оставшийся динамический facade, неявные зависимости сервисов и гонку закрытия подписок. Подробности и результаты тестов — в [отчёте проверки](refactoring-review.md). `main.py` сокращён до app factory/lifespan, глобальный `sim` удалён. Выделены Settings, схемы и entity state, routers, четыре доменных сервиса, SensorHub, EncoderSession, GazeboClient, GazeboProcess, PoseTracker и ModelCatalog; критерии завершения всего плана пока не выполнены.
 
 Проверка в Docker: 15 unit-тестов, `regression.py`, `smoke.py`, `docker compose config --quiet`. Оставшиеся сценарии расширенного media/stream fault coverage перечислены в README и не менялись переносом модулей.
 
