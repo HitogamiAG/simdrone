@@ -48,6 +48,7 @@ class Adapter:
         self.release = asyncio.Event()
         self.release.set()
         self.stopped = []
+        self.parameters = {'MPC_XY_VEL_MAX': 10.0}
 
     async def start(self, record):
         record.workdir.mkdir(parents=True, exist_ok=True)
@@ -70,10 +71,11 @@ class Adapter:
     async def set_parameter(self, record, name, value):
         self.entered.set()
         await self.release.wait()
+        self.parameters[name] = value
         return value
 
     async def get_parameters(self, record):
-        return {'MPC_XY_VEL_MAX': 10.0}
+        return dict(self.parameters)
 
 
 def service(tmp_path):
@@ -116,6 +118,21 @@ def test_start_failure_and_failed_restart_release_processes(tmp_path):
         assert record.workdir.exists()
         hub.px4.fail = False
         assert (await hub.restart(record.id))['status'] == 'running'
+        await hub.shutdown()
+    asyncio.run(run())
+
+
+def test_stop_start_and_restart_preserve_confirmed_parameters(tmp_path):
+    async def run():
+        hub = service(tmp_path)
+        created = await hub.create('drone', 'x500_gimbal')
+        iid = created['id']
+        await hub.patch_parameters(iid, {'MPC_XY_VEL_MAX': 7.5})
+        await hub.stop(iid)
+        assert (await hub.start_instance(iid))['status'] == 'running'
+        assert (await hub.get_parameters(iid))['MPC_XY_VEL_MAX'] == 7.5
+        await hub.restart(iid)
+        assert (await hub.get_parameters(iid))['MPC_XY_VEL_MAX'] == 7.5
         await hub.shutdown()
     asyncio.run(run())
 

@@ -26,6 +26,7 @@ class Instance:
     mavsdk_process: asyncio.subprocess.Process | None = None
     system: object | None = None
     telemetry: object | None = None
+    saved_parameters: dict | None = None
     monitor: asyncio.Task | None = None
     operation_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     udp_port: int = field(init=False)
@@ -157,6 +158,7 @@ class InstanceService:
                 record.monitor.cancel()
                 await asyncio.gather(record.monitor, return_exceptions=True)
                 record.monitor = None
+            await self._capture_parameters(record)
             await self.px4.stop(record)
             try:
                 await self._start_record(record)
@@ -176,6 +178,7 @@ class InstanceService:
                 record.monitor.cancel()
                 await asyncio.gather(record.monitor, return_exceptions=True)
                 record.monitor = None
+            await self._capture_parameters(record)
             await self.px4.stop(record)
             record.status, record.last_error = "stopped", None
         return self.serialize(record)
@@ -217,7 +220,9 @@ class InstanceService:
         async with record.operation_lock:
             self._get_running(instance_id)
             try:
-                return await self.px4.get_parameters(record)
+                parameters = await self.px4.get_parameters(record)
+                record.saved_parameters = dict(parameters)
+                return parameters
             except Exception as exc:
                 raise HubError(503, "parameter_read_failed", "Could not read PX4 parameters", str(exc)) from exc
 
@@ -241,7 +246,15 @@ class InstanceService:
                 parameters = await self.px4.get_parameters(record)
             except Exception as exc:
                 raise HubError(503, "parameter_patch_partial", "Changes confirmed but final snapshot unavailable", {"applied": applied, "unconfirmed": {}, "snapshot_error": str(exc)}) from exc
+            record.saved_parameters = dict(parameters)
             return {"applied": applied, "parameters": parameters}
+
+    async def _capture_parameters(self, record):
+        if record.system is not None and record.status in {"running", "restarting"}:
+            try:
+                record.saved_parameters = dict(await self.px4.get_parameters(record))
+            except Exception as exc:
+                raise HubError(503, "parameter_snapshot_failed", "Could not preserve PX4 parameters before stopping", str(exc)) from exc
 
     def _get(self, instance_id):
         record = self.instances.get(instance_id)
@@ -269,6 +282,18 @@ class InstanceService:
         record.status, record.last_error = "starting", None
         try:
             await asyncio.wait_for(self.px4.start(record), self.settings.startup_timeout)
+            if record.saved_parameters is None:
+                record.saved_parameters = dict(await self.px4.get_parameters(record))
+            else:
+                for name, value in record.saved_parameters.items():
+                    await self.px4.set_parameter(record, name, value)
+                observed = await self.px4.get_parameters(record)
+                mismatched = {name: {"expected": value, "observed": observed.get(name)}
+                              for name, value in record.saved_parameters.items()
+                              if observed.get(name) is None or abs(observed[name] - value) > max(1e-4, abs(value) * 1e-4)}
+                if mismatched:
+                    raise RuntimeError(f"Saved PX4 parameters were not restored: {mismatched}")
+                record.saved_parameters = dict(observed)
         except BaseException:
             await self.px4.stop(record)
             raise
