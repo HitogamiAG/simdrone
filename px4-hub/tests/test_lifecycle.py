@@ -137,6 +137,32 @@ def test_stop_start_and_restart_preserve_confirmed_parameters(tmp_path):
     asyncio.run(run())
 
 
+def test_restart_snapshot_failure_keeps_process_pair_monitored(tmp_path):
+    async def run():
+        hub = service(tmp_path)
+        instance_id = (await hub.create('d0', 'x500_gimbal'))['id']
+        record = hub.instances[instance_id]
+        original_monitor = record.monitor
+
+        async def fail_snapshot(_record):
+            raise RuntimeError('MAVSDK parameter read failed')
+
+        hub.px4.get_parameters = fail_snapshot
+        with pytest.raises(HubError) as exc:
+            await hub.restart(instance_id)
+        assert exc.value.code == 'parameter_snapshot_failed'
+        assert record.status == 'running'
+        assert record.monitor is original_monitor and not original_monitor.done()
+
+        record.px4_process.exit()
+        await asyncio.wait_for(original_monitor, 1)
+        assert record.status == 'failed'
+        assert record.px4_process is None and record.mavsdk_process is None
+        await hub.shutdown()
+
+    asyncio.run(run())
+
+
 def test_stop_start_preserves_instance_slot_and_parameter_directory(tmp_path):
     async def run():
         hub = service(tmp_path)

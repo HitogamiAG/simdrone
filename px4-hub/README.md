@@ -24,7 +24,7 @@ curl -X POST http://localhost:8002/api/v1/instances/ \
   -d '{"drone_id":"DRONE_API_ID"}'
 ```
 
-Настройки Hub задаются в `.env.example`: `PX4_HUB_PORT`, `MAX_PX4_INSTANCES`, `PX4_STARTUP_TIMEOUT`, `PX4_STOP_TIMEOUT`, `GZ_PARTITION` и `LOG_LEVEL`. Максимум — три instance. PX4 logs и параметры хранятся в отдельном каталоге каждого instance внутри контейнера и удаляются при DELETE. Реестр в памяти; после перезапуска контейнера процессы не восстанавливаются. В production volume для логов сейчас не предусмотрен.
+Настройки Hub задаются в `.env.example`: `PX4_HUB_PORT`, `MAX_PX4_INSTANCES`, `PX4_STARTUP_TIMEOUT`, `PX4_STOP_TIMEOUT`, `GZ_PARTITION` и `LOG_LEVEL`. Максимум — три instance. PX4 logs и параметры хранятся в отдельном каталоге каждого instance внутри контейнера и удаляются при DELETE. Реестр в памяти; после перезапуска контейнера процессы не восстанавливаются. В production volume для логов сейчас не предусмотрен. Перед restart Hub сначала читает разрешённые параметры; если snapshot не получен, процессы остаются запущенными и мониторинг продолжает работать.
 
 ## API
 

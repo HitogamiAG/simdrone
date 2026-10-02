@@ -153,16 +153,23 @@ class InstanceService:
             if self.instances.get(instance_id) is not record or record.status == "stopping":
                 raise HubError(409, "instance_stopping", "PX4 instance is being deleted")
             await self._require_running_world()
+            # Keep the process monitor active until the snapshot succeeds. If
+            # MAVSDK cannot read parameters, restart must leave the live pair
+            # monitored and the record in its original running state.
+            await self._capture_parameters(record)
             record.status = "restarting"
             if record.monitor:
                 record.monitor.cancel()
                 await asyncio.gather(record.monitor, return_exceptions=True)
                 record.monitor = None
-            await self._capture_parameters(record)
-            await self.px4.stop(record)
             try:
+                await self.px4.stop(record)
                 await self._start_record(record)
             except Exception as exc:
+                try:
+                    await self.px4.stop(record)
+                except Exception:
+                    pass
                 record.status, record.last_error = "failed", str(exc)
                 raise HubError(503, "restart_failed", "PX4 instance failed to restart", str(exc)) from exc
         return self.serialize(record)
