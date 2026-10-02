@@ -68,7 +68,7 @@ docker compose exec -T gazebo-service python /opt/uav/tests/smoke.py
 docker compose config --quiet
 ```
 
-`tests/integration.py` проверяет живые create, PX4 parameter PATCH + stop/start/restart, sensor PATCH, drone-reset, паузу, world PATCH и reset. `tests/realtime_integration.py` проверяет два клиента одного канала, медленного читателя и invalidation при DELETE. Скрипты меняют мир; запускать без параллельных клиентов. Браузерный тест WHEP находится в `tests/webrtc_browser.js`, Dockerfile фиксирует Chrome и Playwright. В Docker Chrome получил и декодировал кадр 1280×720; два зрителя разделили одну публикацию, закрытие первого не остановило второго, уход последнего выключил камеру. RTSP/H.264 smoke запускается отдельно и не заменяет проверку браузера.
+`tests/integration.py` проверяет два работающих дрона с независимыми PX4 параметрами и свежей телеметрией, stop/start/restart, sensor PATCH, drone-reset, паузу, world PATCH и reset. `tests/realtime_integration.py` проверяет два клиента одного канала, медленного читателя и invalidation при DELETE. Скрипты меняют мир; запускать без параллельных клиентов. Браузерный тест WHEP находится в `tests/webrtc_browser.js`, Dockerfile фиксирует Chrome и Playwright. В Docker Chrome получил и декодировал кадр 1280×720; два зрителя разделили одну публикацию, закрытие первого не остановило второго, уход последнего выключил камеру. RTSP/H.264 smoke запускается отдельно и не заменяет проверку браузера.
 
 Сборка и запуск браузерной проверки:
 

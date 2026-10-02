@@ -53,6 +53,22 @@ def main():
         sensor_after_reset = request(client, "GET", f"/drones/{did}/sensors/{imu['id']}/")
         assert abs(sensor_after_reset["update_rate"] - base_rate) < 1e-4
 
+        second = request(client, "POST", "/drones/", json={
+            "model": "x500_gimbal", "name": f"backend_it_second_{int(time.time())}",
+            "pose": {"position": {"x": 2, "y": 0, "z": 3}},
+        })
+        second_id = second["id"]
+        assert second["autopilot"]["px4"]["telemetry_fresh"]
+        first_value, second_value = 8.0, 7.0
+        request(client, "PATCH", f"/drones/{did}/autopilot/parameters", json={"MPC_XY_VEL_MAX": first_value})
+        request(client, "PATCH", f"/drones/{second_id}/autopilot/parameters", json={"MPC_XY_VEL_MAX": second_value})
+        first_parameters = request(client, "GET", f"/drones/{did}/autopilot/parameters")
+        second_parameters = request(client, "GET", f"/drones/{second_id}/autopilot/parameters")
+        assert abs(first_parameters["MPC_XY_VEL_MAX"] - first_value) < 1e-4
+        assert abs(second_parameters["MPC_XY_VEL_MAX"] - second_value) < 1e-4
+        assert request(client, "GET", f"/drones/{did}/")["autopilot"]["px4"]["telemetry_fresh"]
+        assert request(client, "GET", f"/drones/{second_id}/")["autopilot"]["px4"]["telemetry_fresh"]
+
         request(client, "POST", "/world/pause")
         denied = client.post(BASE + "/drones/", json={"model": "x500_gimbal"}, timeout=10)
         assert denied.status_code == 409 and denied.json()["error"]["code"] == "simulation_paused"
@@ -64,10 +80,12 @@ def main():
         assert request(client, "GET", "/world")["physics"]["real_time_factor"] == 1.0
         stale = client.get(BASE + f"/drones/{did}/", timeout=10)
         assert stale.status_code == 404
+        stale_second = client.get(BASE + f"/drones/{second_id}/", timeout=10)
+        assert stale_second.status_code == 404
         assert request(client, "GET", "http://px4-hub:8002/api/v1/instances/") == []
         request(client, "POST", "/world/reset")
         assert request(client, "GET", "/world")["physics"]["real_time_factor"] == initial["physics"]["real_time_factor"]
-    print("PASS backend integration: lifecycle, parameters, sensor reset, pause, world patch/reset")
+    print("PASS backend integration: two drones, independent PX4 parameters, sensor reset, pause, world patch/reset")
 
 
 if __name__ == "__main__":
