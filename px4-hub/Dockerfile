@@ -46,6 +46,7 @@ ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \
     GZ_VERSION=harmonic PX4_HOME_LAT=47.397742 PX4_HOME_LON=8.545594 PX4_HOME_ALT=488
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 python3-venv gz-sim8-cli=8.15.0-1~noble \
+    gz-transport13-cli=13.6.0-1~noble \
     libgz-transport13=13.6.0-1~noble libgz-sim8=8.15.0-1~noble && \
     rm -rf /var/lib/apt/lists/*
 WORKDIR /opt/uav

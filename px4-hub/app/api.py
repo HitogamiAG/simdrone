@@ -1,0 +1,112 @@
+import asyncio
+from fastapi import APIRouter, FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
+
+from .errors import HubError, error_response
+from .schemas import InstanceCreate, ParameterPatch
+
+router = APIRouter()
+
+
+@router.get("/healthz")
+async def healthz():
+    return {"status": "ok"}
+
+
+@router.get("/api/v1/instances/")
+async def list_instances(request: Request):
+    return await request.app.state.service.list()
+
+
+@router.post("/api/v1/instances/", status_code=201)
+async def create_instance(body: InstanceCreate, request: Request):
+    return await request.app.state.service.create(body.drone_id, body.profile)
+
+
+@router.get("/api/v1/instances/{instance_id}/")
+async def get_instance(instance_id: str, request: Request):
+    return await request.app.state.service.get(instance_id)
+
+
+@router.delete("/api/v1/instances/{instance_id}/")
+async def delete_instance(instance_id: str, request: Request):
+    return await request.app.state.service.delete(instance_id)
+
+
+@router.post("/api/v1/instances/{instance_id}/restart")
+async def restart_instance(instance_id: str, request: Request):
+    return await request.app.state.service.restart(instance_id)
+
+
+@router.get("/api/v1/instances/{instance_id}/parameters/")
+async def get_parameters(instance_id: str, request: Request):
+    return await request.app.state.service.get_parameters(instance_id)
+
+
+@router.patch("/api/v1/instances/{instance_id}/parameters/")
+async def patch_parameters(instance_id: str, body: ParameterPatch, request: Request):
+    return await request.app.state.service.patch_parameters(instance_id, body.model_dump(exclude_unset=True))
+
+
+@router.websocket("/api/v1/instances/{instance_id}/telemetry")
+async def telemetry(instance_id: str, websocket: WebSocket):
+    service = websocket.app.state.service
+    try:
+        record = service._get_running(instance_id)
+    except HubError:
+        await websocket.close(code=1008, reason="instance is not available")
+        return
+    fanout = record.telemetry
+    if fanout is None:
+        await websocket.close(code=1008, reason="instance telemetry is unavailable")
+        return
+    await websocket.accept()
+    queue = fanout.subscribe()
+    try:
+        while True:
+            try:
+                message = await asyncio.wait_for(queue.get(), timeout=1)
+                await websocket.send_json(message)
+            except asyncio.TimeoutError:
+                if record.status != "running":
+                    await websocket.close(code=1012, reason="PX4 instance stopped")
+                    break
+    except WebSocketDisconnect:
+        return
+    finally:
+        fanout.unsubscribe(queue)
+
+
+def create_app(settings=None, service_factory=None):
+    from contextlib import asynccontextmanager
+    from .config import Settings
+    from .service import InstanceService
+
+    config = settings or Settings()
+    factory = service_factory or InstanceService
+
+    @asynccontextmanager
+    async def lifespan(app):
+        service = factory(config)
+        app.state.service = service
+        await service.start()
+        try:
+            yield
+        finally:
+            await service.shutdown()
+            app.state.service = None
+
+    app = FastAPI(title="PX4 Hub", version="0.1.0", lifespan=lifespan)
+    app.include_router(router)
+    app.add_exception_handler(HubError, error_response)
+
+    async def validation_error(request, exc: RequestValidationError):
+        return JSONResponse(status_code=422, content={"error": {"code": "invalid_input",
+            "message": "Request validation failed", "details": exc.errors()}})
+
+    app.add_exception_handler(RequestValidationError, validation_error)
+    return app
+
+
+app = create_app()

@@ -9,6 +9,7 @@ services:
       WORLD_SDF: /opt/uav/third-party/worlds/${WORLD_FILE:-empty.sdf}
       MODEL_ROOTS: /opt/uav/third-party/models:/opt/uav/models:/opt/uav/app/models
       GZ_SIM_RESOURCE_PATH: /opt/uav/models:/opt/uav/third-party/models:/opt/uav/app/models
+      GZ_PARTITION: ${GZ_PARTITION:-uav-sim}
       MEDIAMTX_RTSP_HOST: localhost
     ports:
       - "${API_PORT:-8000}:8000"
@@ -25,6 +26,34 @@ services:
       timeout: 4s
       start_period: 120s
       retries: 12
+
+  px4-hub:
+    build:
+      context: .
+      dockerfile: px4-hub/Dockerfile
+    image: uav-px4-hub:local
+    env_file: .env
+    environment:
+      PX4_HUB_HOST: 0.0.0.0
+      PX4_HUB_PORT: 8002
+      GAZEBO_API_URL: http://gazebo-service:8000
+      MAX_INSTANCES: ${MAX_PX4_INSTANCES:-3}
+      PX4_BINARY: /opt/PX4-Autopilot/build/px4_sitl_default/bin/px4
+      GZ_PARTITION: ${GZ_PARTITION:-uav-sim}
+    ports:
+      - "${PX4_HUB_PORT:-8002}:8002"
+    depends_on:
+      gazebo-service:
+        condition: service_started
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8002/healthz"]
+      interval: 10s
+      timeout: 3s
+      start_period: 10s
+      retries: 3
 
   mediamtx:
     build:
@@ -43,3 +72,8 @@ services:
     restart: unless-stopped
     init: true
     stop_grace_period: 5s
+
+networks:
+  default:
+    name: uav-simulation
+    driver: bridge

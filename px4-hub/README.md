@@ -1,6 +1,6 @@
 # PX4 Hub
 
-PX4 Hub запускает до трёх независимых PX4 SITL и MAVSDK backend, каждый привязан к уже существующему `x500_gimbal` в Gazebo. Все процессы принадлежат одному FastAPI-контейнеру и одному Uvicorn worker. Используются PX4 v1.16.0 и MAVSDK-Python 4.0.3.
+PX4 Hub запускает до трёх независимых PX4 SITL и MAVSDK backend, каждый привязан к уже существующему `x500_gimbal` в Gazebo. Все процессы принадлежат одному FastAPI-контейнеру и одному Uvicorn worker. Используются PX4 v1.16.0 и gRPC-обёртка MAVSDK `mavsdk-grpc` 3.17.4. Начиная с `mavsdk` 4.x имя пакета обозначает native SDK без `mavsdk_server`, поэтому Hub использует отдельный пакет с прежним gRPC API.
 
 ## Запуск
 
@@ -39,11 +39,13 @@ curl -X POST http://localhost:8002/api/v1/instances/ \
 
 Создание проверяет наличие модели `x500_gimbal` и работающего мира. PX4 instance numbers занимают свободные slots `0–2`; system ID равен slot + 1. MAVLink и gRPC endpoints каждому процессу выделяются из своих диапазонов. Одну Gazebo-модель нельзя привязать повторно.
 
+Hub запускает выделенные MAVSDK и PX4 процессы, затем подключает Python-клиент к gRPC после обнаружения MAVLink-системы и ждёт позиционную телеметрию. Это сохраняет независимый backend для каждого instance и избегает взаимного ожидания старта PX4 и MAVSDK.
+
 GET instance отдельно сообщает процессное состояние, привязку, доступность Gazebo, паузу, MAVSDK connection, свежесть телеметрии и `ready_to_arm`. Последний флаг является диагностикой PX4 health, а не гарантией успешной команды arm.
 
 PATCH параметров разрешает только `MPC_XY_VEL_MAX`, `MPC_Z_VEL_MAX_UP` и `MPC_Z_VEL_MAX_DN`. Значения должны быть конечными положительными числами. Каждый setter подтверждается обратным чтением; при частичном отказе ошибка содержит поля `applied` и `unconfirmed`. Изменение параметров запрещено на паузе симуляции.
 
-WebSocket публикует `armed`, `flight_mode`, `position`, `velocity`, `attitude`, `battery`, `gps`, `health` и `status_text` с временем получения. Клиенты имеют отдельные ограниченные очереди, поэтому медленный клиент не блокирует остальных. Flight commands, control и missions пока не реализованы; capabilities возвращают `false`.
+WebSocket публикует `armed`, `flight_mode`, `position`, `velocity`, `attitude`, `battery`, `gps`, `health` и `status_text` с временем получения. Клиенты имеют отдельные ограниченные очереди, поэтому медленный клиент не блокирует остальных. Для WS-протокола закреплён `websockets==15.0.1`. Flight commands, control и missions пока не реализованы; capabilities возвращают `false`.
 
 ## Reset и ограничения
 
@@ -63,7 +65,26 @@ docker run --rm --network none \
   -q /opt/px4-hub/tests
 ```
 
-Реальные интеграционные сценарии необходимо запускать последовательно: два и три instances, параметры и restart, несколько WebSocket-клиентов, pause/resume, process crash и согласованный reset через внешний клиент. Существующие интеграционные тесты Gazebo меняют мир; не запускать их одновременно с Hub-сценариями.
+Gazebo Service проверяется последовательно в том же Compose окружении:
+
+```sh
+docker compose exec -T gazebo-service pytest -q /opt/uav/tests/test_contract.py
+docker compose exec -T gazebo-service python /opt/uav/tests/regression.py
+docker compose exec -T gazebo-service python /opt/uav/tests/smoke.py
+docker compose config --quiet
+```
+
+Реальные интеграционные сценарии запускаются последовательно, поскольку тесты Gazebo меняют мир. Проверки, выполненные в Docker 02.10.2026:
+
+- PX4 SITL действительно обнаруживает `/world/empty/clock` через `gz-transport13-cli`, подключается к уже созданному `x500_gimbal` и возвращает `201` после свежей телеметрии позиции. Runtime-образ должен содержать как `gz-sim8-cli`, так и `gz-transport13-cli`.
+- Одновременно запущены три SITL: system ID `1–3`, UDP `14540–14542`, gRPC `50051–50053`; instance GET показал живые парные процессы и свежую телеметрию. Четвёртый запрос получил `409 instance_limit`.
+- PATCH `MPC_XY_VEL_MAX` подтвердился обратным чтением и сохранился после restart. Pause оставил процессы живыми; изменение параметра ответило `409 simulation_paused`, после resume телеметрия восстановилась.
+- Принудительное завершение PX4 и, отдельно, MAVSDK переводило только соответствующий instance в `failed` и завершало его парный процесс; соседний instance оставался `running`.
+- Два WebSocket-клиента получали телеметрию независимо. Отключение одного не остановило второго; DELETE закрыл поток и освободил процессы.
+- World-reset после DELETE всех Hub instances вернул список дронов к `[]`.
+- PX4 Hub: контрактные тесты — `5 passed`; Gazebo Service: `15 passed`, `regression.py` passed, `smoke.py` passed (включая H.264 RTSP); `docker compose config --quiet` прошёл.
+
+Не проверялись конкурентное создание нескольких instances в один момент, поведение медленного WS-клиента в реальном потоке, а также согласование reset/delete/set_pose между Hub и Gazebo через будущий общий backend.
 
 ## Сборка образа и доступ к GitHub
 
@@ -91,9 +112,9 @@ docker compose build --progress plain px4-hub
 Проверки исправленного Dockerfile:
 
 - `docker compose build px4-hub` — полная сборка прошла без патчей исходников PX4.
-- Runtime-образ: 946 493 594 байта (около 903 MiB); Git и компилятор отсутствуют.
+- Runtime-образ после добавления Transport CLI: 996 548 063 байта (около 950 MiB); Git и компилятор отсутствуют.
 - `px4 -h`, наличие `rootfs/etc/init.d-posix/rcS`, `ldd` PX4 и наличие штатного `mavsdk_server` — проверены в собранном образе; отсутствующих библиотек нет.
 - Изолированный контейнер (`docker run --network none uav-px4-hub:local`) запускается от пользователя `px4`; `/healthz` отвечает `200`, Docker healthcheck проходит, остановка контейнера завершает приложение штатно.
-- Контрактные тесты в Docker — `3 passed`; `docker compose config --quiet` — успешно.
-
-Эти проверки подтверждают сборку и запуск приложения. Подключение PX4 к модели Gazebo и сценарии нескольких instances этой проверкой Dockerfile не подтверждены; они остаются отдельным интеграционным этапом.
+- `mavsdk-grpc==3.17.4` поставляет отдельный `mavsdk_server`; `mavsdk==4.0.3` больше не является gRPC-клиентом. `websockets==15.0.1` требуется Uvicorn для обслуживания telemetry WebSocket.
+- `gz topic -l` из контейнера Hub показал `/world/empty/clock` и сенсорные топики модели; оба контейнера используют `GZ_PARTITION=uav-sim` и одну Compose-сеть.
+- Полный интеграционный прогон Hub и Gazebo Service описан в разделе «Проверки» выше.
