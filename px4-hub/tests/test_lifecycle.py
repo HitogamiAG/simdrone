@@ -150,3 +150,50 @@ def test_process_failure_stops_pair_and_preserves_neighbour(tmp_path):
         assert hub.instances[second].status == 'running'
         await hub.shutdown()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize('timeout', [False, True])
+def test_interrupted_start_releases_slot_and_directory(tmp_path, timeout):
+    async def run():
+        from dataclasses import replace
+        hub = service(tmp_path)
+        hub.settings = replace(hub.settings, startup_timeout=0.05)
+        original = hub.px4.start
+        entered = asyncio.Event()
+        async def blocked(record):
+            await original(record)
+            entered.set()
+            await asyncio.Event().wait()
+        hub.px4.start = blocked
+        creating = asyncio.create_task(hub.create('d0', 'x500_gimbal'))
+        await entered.wait()
+        if timeout:
+            with pytest.raises(HubError) as exc:
+                await creating
+            assert exc.value.code == 'startup_timeout'
+        else:
+            creating.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await creating
+        assert not hub.instances and not list(tmp_path.iterdir())
+        hub.px4.start = original
+        assert (await hub.create('d0', 'x500_gimbal'))['process']['instance_id'] == 0
+        await hub.shutdown()
+    asyncio.run(run())
+
+
+def test_parameter_partial_failure_reports_confirmed_fields(tmp_path):
+    async def run():
+        hub = service(tmp_path)
+        instance_id = (await hub.create('d0', 'x500_gimbal'))['id']
+        async def set_parameter(record, name, value):
+            if name == 'MPC_Z_VEL_MAX_UP':
+                raise TimeoutError('unconfirmed')
+            return value
+        hub.px4.set_parameter = set_parameter
+        with pytest.raises(HubError) as exc:
+            await hub.patch_parameters(instance_id, {'MPC_XY_VEL_MAX': 10, 'MPC_Z_VEL_MAX_UP': 2})
+        assert exc.value.details['applied'] == {'MPC_XY_VEL_MAX': 10}
+        assert set(exc.value.details['unconfirmed']) == {'MPC_Z_VEL_MAX_UP'}
+        await hub.shutdown()
+    asyncio.run(run())
