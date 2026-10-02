@@ -1,0 +1,233 @@
+# Gazebo Server API
+
+Сервис запускает один Gazebo Server с одним миром, предоставляет HTTP API для управления миром, дронами и сенсорами, WebSocket для измерений и H.264/RTSP через MediaMTX для камер. Реализация использует Python, FastAPI и Gazebo Harmonic. PX4 SITL и MAVSDK не запускаются.
+
+## Запуск
+
+Из корня проекта:
+
+```sh
+docker compose up --build
+```
+
+Рабочая конфигурация находится в `../.env`, образец — в [`.env.example`](../.env.example). По умолчанию загружается мир `empty`, симуляция работает. На хосте не нужны Gazebo и GPU: контейнер использует headless Ogre2/EGL и Mesa software rendering. Текущий Dockerfile MediaMTX скачивает бинарник для Linux amd64.
+
+| Назначение | Адрес по умолчанию |
+| --- | --- |
+| HTTP API | `http://localhost:8000` |
+| OpenAPI UI / схема | `http://localhost:8000/docs` / `/openapi.json` |
+| Готовность | `http://localhost:8000/healthz` |
+| Видео | `rtsp://localhost:8554/drones/{drone-id}/sensors/{sensor-id}` |
+
+Compose проверяет `/healthz`, ожидая запуска мира. `server-alive` отдельно возвращает `process_alive` и `world_ready`: живой процесс ещё не означает готовность Transport. Приложение запускается одним worker, поскольку процесс Gazebo и реестры принадлежат этому экземпляру сервиса. Дополнительную авторизацию HTTP API первая поставка не включает.
+
+## Маршруты
+
+Все пути ниже указаны полностью. `/api/v1/world/list` отсутствует: сервис управляет одним миром.
+
+| Метод | Путь | Назначение |
+| --- | --- | --- |
+| GET | `/api/v1/server/server-alive/` | Состояние процесса и готовность мира |
+| POST | `/api/v1/server/server-reboot/` | Перезапуск исходного мира и процесса Gazebo |
+| GET | `/api/v1/world` | Настройки, модели, свет, статистика, источники и возможности изменения |
+| PATCH | `/api/v1/world` | Частичное изменение поддерживаемых настроек |
+| POST | `/api/v1/world/world-reset` | Восстановление мира через перезапуск исходного SDF |
+| POST | `/api/v1/world/pause` | Пауза симуляции |
+| POST | `/api/v1/world/resume` | Возобновление симуляции |
+| GET / POST | `/api/v1/drones/` | Список / создание дрона |
+| GET / PATCH / DELETE | `/api/v1/drones/{drone-id}/` | Чтение / изменение позы / удаление |
+| POST | `/api/v1/drones/{drone-id}/reset` | Восстановление начального состояния дрона |
+| GET | `/api/v1/drones/{drone-id}/sensors/` | Список сенсоров |
+| GET / PATCH | `/api/v1/drones/{drone-id}/sensors/{sensor-id}/` | Чтение / изменение частоты |
+| POST | `/api/v1/drones/{drone-id}/sensors/{sensor-id}/reset` | Восстановление исходной частоты и очистка кеша |
+| WebSocket | `/api/v1/drones/{drone-id}/sensors/{sensor-id}/stream` | Измерения обычного сенсора |
+| POST | `/api/v1/drones/{drone-id}/sensors/{sensor-id}/activate` | Запуск видеопубликации камеры |
+| POST | `/api/v1/drones/{drone-id}/sensors/{sensor-id}/deactivate` | Остановка видеопубликации камеры |
+
+Pause/resume и activate/deactivate идемпотентны. Создание дрона возвращает HTTP `201`. API-id дрона отделён от `entity_id` Gazebo; идентификатор сенсора используется в пределах своего дрона.
+
+## Запросы и текущие данные
+
+### Мир
+
+Пример частичного PATCH:
+
+```json
+{
+  "physics": {"max_step_size": 0.004, "real_time_factor": 1.0},
+  "gravity": {"x": 0, "y": 0, "z": -9.80665},
+  "spherical_coordinates": {"latitude_deg": 43.2389, "longitude_deg": 76.8897}
+}
+```
+
+Можно передать только нужные поля. Значения объединяются с текущими компонентами мира, включая изменения сторонних Transport-клиентов. PATCH временно ставит работающий мир на паузу и восстанавливает прежний режим; результат подтверждается чтением состояния.
+
+| Настройка | Изменение через API | Ограничение |
+| --- | --- | --- |
+| `physics.max_step_size` | Да | Конечное положительное число |
+| `physics.real_time_factor` | Да | Конечное положительное число; желаемый RTF, фактический зависит от нагрузки |
+| `gravity` | Да | Конечный вектор `{x,y,z}` |
+| `spherical_coordinates` | Да | Частичные `latitude_deg`, `longitude_deg`, `elevation`, `heading_deg`; только `EARTH_WGS84` |
+| `magnetic_field` | Нет | Обработчик PhysicsCmd этой версии не применяет поле |
+| `physics.real_time_update_rate` | Нет | Обработчик PhysicsCmd этой версии не применяет поле |
+| Physics backend | Нет | Выбирается при загрузке мира |
+| `atmosphere` | Нет | Runtime setter не реализован в интеграции |
+| `scene/environment` | Нет | Изменение не реализовано в API |
+
+GET читает physics, gravity, географическую привязку, магнитное поле и scene через текущий снимок компонентов `/world/{world}/state`. Позы моделей берутся из `pose/info`; `scene/info` используется для структуры сцены и света. `sources` указывает источник, актуальность и время симуляции для настроек.
+
+`current_sdf` — отдельный экспорт Gazebo с `available` и `fresh: false`: экспорт этой версии содержит исходные настройки мира даже после runtime-изменений. Он не служит источником текущих physics/gravity. Atmosphere возвращается с пометкой `source: startup SDF`, `fresh: false`.
+
+PATCH мира не является транзакцией. Если поздняя операция отказала, ранее подтверждённые изменения сохраняются. Ошибка содержит `details.applied` и `details.unconfirmed`. Неподдерживаемые поля отклоняются до отправки команд. Runtime-изменения не записываются в SDF.
+
+### Дроны
+
+Создание:
+
+```json
+{
+  "model": "test_quad",
+  "name": "quad_one",
+  "pose": {
+    "position": {"x": 0, "y": 0, "z": 2},
+    "orientation": {"x": 0, "y": 0, "z": 0, "w": 1}
+  }
+}
+```
+
+`model` — ключ установленного каталога; произвольные пути и загрузка SDF через API не принимаются. Имя и поза необязательны: по умолчанию генерируется имя, позиция равна `(0,0,1)`, ориентация единичная. Поставляются `test_quad`, `x500_gimbal` и модели из закреплённого PX4-gazebo-models.
+
+PATCH принимает только `pose` в том же формате. Позиция задаётся в метрах в системе мира, quaternion — в порядке `x,y,z,w`. Числа должны быть конечными, quaternion нормализуется; нулевой quaternion отклоняется. Скорости через PATCH не изменяются.
+
+PATCH вызывает `set_pose`, временно приостанавливает работающий мир и проверяет **позицию и ориентацию** по `pose/info`. Gazebo entity-id сохраняется; удаление и пересоздание в PATCH не выполняются. При неподтверждённом результате возвращается таймаут. GET дрона, список и позы моделей в GET мира также используют текущие позы, а не закешированную позу из `scene/info`.
+
+### Сенсоры и WebSocket
+
+PATCH частоты:
+
+```json
+{"update_rate": 20}
+```
+
+Операция доступна, когда Gazebo объявляет соответствующий `/set_rate`. При ненулевом `update_rate` в SDF допустима частота `0 < rate <= исходная`; при исходном нуле допускается ноль и положительные значения. Ноль означает режим обновления сенсора, а не универсальную команду выключения.
+
+Успех подтверждается последовательными интервалами измерений во времени симуляции с допуском на шаг физики. Ответ различает номинальный `update_rate`, `update_rate_source` и эффективный `observed_update_rate`. Последний sample и наблюдаемая частота доступны по мере получения данных подпиской или видеопубликацией. При паузе PATCH/reset частоты возвращает `409 simulation_paused` до отправки setter: нужно возобновить симуляцию. Таймаут подтверждения не доказывает, что команда не применена.
+
+Пример адреса WebSocket:
+
+```text
+ws://localhost:8000/api/v1/drones/{drone-id}/sensors/imu_sensor/stream
+```
+
+Сообщение содержит `sensor_id`, `type`, `sim_time` и `data` с protobuf-данными, преобразованными в JSON. Например:
+
+```json
+{
+  "sensor_id": "imu_sensor",
+  "type": "imu",
+  "sim_time": {"sec": "12", "nsec": 4000000},
+  "data": {"header": {"stamp": {"sec": "12", "nsec": 4000000}}}
+}
+```
+
+`sec` может быть строкой согласно JSON-представлению protobuf int64. Обычная Transport-подписка разделяется между клиентами. Очередь каждого клиента хранит один свежий sample; при паузе искусственные измерения не создаются. Drone-reset/delete закрывает прежние соединения с кодом `1008`, reboot/world-reset — с `1012`; после reset клиент подключается заново. Camera WebSocket отклоняется: видео доступно через RTSP.
+
+## Reset и освобождение ресурсов
+
+| Операция | Результат |
+| --- | --- |
+| Drone PATCH | Меняет позу, сохраняет API-id и Gazebo entity-id; не сбрасывает модель |
+| Drone-reset | Удаляет модель и создаёт из сохранённого начального SDF и позы; API-id сохраняется, entity-id меняется. Физическое состояние и состояния плагинов создаются заново |
+| Sensor-reset | Восстанавливает исходную частоту, очищает кеш и инвалидирует старые сообщения очереди; не сбрасывает шум, bias и калибровку |
+| DELETE дрона | Останавливает камеры, снимает подписки, закрывает WebSocket и удаляет модель |
+| World-reset / server-reboot | Останавливает публикации и подписки, завершает принадлежащую сервису группу процессов Gazebo и заново загружает исходный SDF. Сбрасывает время и настройки, восстанавливает исходные модели, удаляет runtime-дроны |
+| Shutdown | Освобождает подписки, кодировщики и процесс Gazebo |
+
+Перед drone-reset проверяется наличие сохранённого описания модели. Если оно недоступно, возвращается `409 reset_unsupported` до удаления. Если повторное создание отказало после удаления, ошибка `drone_recreate_failed` явно сообщает `removed: true`. Reset — последовательность операций, а не атомарное восстановление.
+
+При drone-reset прежние записи сенсоров заменяются. Ранее активные камеры запускаются после готовности новых сенсоров. World-reset/reboot не восстанавливает публикации runtime-дронов.
+
+## Видео и MediaMTX
+
+Путь публикации: `drones/{drone-id}/sensors/{sensor-id}`. Поток проходит через Gazebo Image → ограниченную очередь rawvideo → FFmpeg/libx264 → RTSP с RTP/UDP → MediaMTX. Текущая реализация поддерживает RGB/BGR с тремя каналами и учитывает stride. Частота входа FFmpeg задана как 25 fps.
+
+Первый RTSP-читатель запускает `runOnDemand`, который вызывает camera activate и остаётся запущенным на время demand. Читатели используют одну публикацию; через пять секунд после ухода последнего MediaMTX завершает hook и вызывает deactivate через `runOnUnDemand`. Activate/deactivate доступны также вручную; GET камеры возвращает `active` и `stream_url`.
+
+Пример получения одного кадра **в контейнере** после создания дрона:
+
+```sh
+docker compose exec -T gazebo-service ffmpeg \
+  -rtsp_transport udp \
+  -i 'rtsp://mediamtx:8554/drones/DRONE_ID/sensors/forward_camera' \
+  -frames:v 1 -y /tmp/camera.jpg
+```
+
+Порт API MediaMTX `9997` доступен внутри Compose. Его учётные данные должны совпадать в `.env` (`MEDIAMTX_API_USER`, `MEDIAMTX_API_PASSWORD`) и [`mediamtx.yml`](../mediamtx/mediamtx.yml). Эти данные относятся к управлению MediaMTX, а не к авторизации HTTP API Gazebo.
+
+## Конфигурация и версии
+
+| Параметры | Назначение |
+| --- | --- |
+| `WORLD_FILE`, `WORLD_NAME` | SDF из `third-party/worlds` и имя мира внутри него |
+| `API_PORT`, `RTSP_PORT`, `RTP_PORT`, `RTCP_PORT`, `HLS_PORT` | Публикуемые Compose порты |
+| `GZ_PARTITION` | Изоляция Gazebo Transport |
+| `GZ_RENDER_ENGINE`, `GZ_VERBOSITY` | Рендеринг и уровень логов Gazebo |
+| `STARTUP_TIMEOUT`, `GZ_REQUEST_TIMEOUT_MS`, `SENSOR_SAMPLE_TIMEOUT` | Ожидание старта, запросов и первого кадра камеры |
+| `FFMPEG_PRESET` | Preset кодировщика H.264 |
+| `MEDIAMTX_API_USER`, `MEDIAMTX_API_PASSWORD` | Доступ сервиса к API MediaMTX |
+| `LOG_LEVEL` | Логирование приложения |
+
+`WORLD_SDF`, `MODEL_ROOTS` и `GZ_SIM_RESOURCE_PATH` задаются в [`docker-compose.yml`](../docker-compose.yml). Для собственного размещения SDF или каталога нужно менять также пути/тома Compose. Формат RTSP URL учитывает опубликованный `RTSP_PORT`; адрес читателя по умолчанию — `localhost`.
+
+Закреплены основные зависимости:
+
+| Компонент | Версия |
+| --- | --- |
+| Базовый образ | Ubuntu 24.04 |
+| `gz-harmonic` | `1.0.0-1~noble` |
+| `gz-sim8-cli` | `8.15.0-1~noble` |
+| `python3-gz-transport13` | `13.6.0-1~noble` |
+| `python3-gz-msgs10` | `10.4.0-1~noble` |
+| FastAPI / Pydantic / Uvicorn | `0.115.12` / `2.11.4` / `0.34.2` |
+| MediaMTX | `1.12.3` |
+| PX4-gazebo-models | commit `a15af9628536914ff7201c992fce5e3cb5d70db9` |
+
+Python-зависимости перечислены в [`requirements.txt`](requirements.txt). Все транзитивные apt/pip-зависимости отдельным lock-файлом не закреплены; тег Ubuntu также не закреплён digest в Dockerfile.
+
+Сервис собирает небольшой [нативный адаптер Transport](app/native/transport_request.cc), освобождающий GIL во время блокирующего запроса и unsubscribe. Стандартный Python binding Transport 13 удерживает GIL при запросе, тогда как callbacks подписок требуют его, что приводило к таймаутам при активных подписках. Transport-запросы и ожидания выполняются вне HTTP event loop.
+
+## Ошибки
+
+Ошибки ресурсных API имеют формат:
+
+```json
+{"error": {"code": "drone_not_found", "message": "...", "details": null}}
+```
+
+Основные статусы: `404` — неизвестный объект; `422` — неверный ввод или неподдерживаемые поля; `409` — невозможная операция в текущем состоянии; `503` — недоступность Gazebo или отказ команды; `504` — неподтверждённый результат/таймаут. `/healthz` при неготовности возвращает стандартный FastAPI HTTP `503` с `detail`.
+
+## Проверки в Docker
+
+```sh
+docker compose exec -T gazebo-service pytest -q /opt/uav/tests/test_contract.py
+docker compose exec -T gazebo-service python /opt/uav/tests/regression.py
+docker compose exec -T gazebo-service python /opt/uav/tests/smoke.py
+```
+
+Интеграционные скрипты изменяют и сбрасывают мир. Запускать их последовательно, без других клиентов, меняющих состояние.
+
+| Проверка | Подтверждённое покрытие |
+| --- | --- |
+| `test_contract.py` | 15 тестов: валидация/API-контракт, сравнение quaternion, декодирование текущего состояния, безопасный отказ reset, инвалидация кеша, частичный отказ PATCH, идемпотентное закрытие SensorSubscription и EncoderSession |
+| `regression.py` | Position/orientation PATCH без смены entity-id, текущие позы GET/list/world, внешние Transport-изменения и сохранение соседних настроек, реальная частота/reset сенсора, закрытие нескольких WebSocket при reset/delete, восстановление активной камеры, полный world-reset |
+| `smoke.py` | Старт и готовность, pause/resume, дрон pose/reset/delete, sensor WebSocket и rate PATCH, on-demand получение и декодирование H.264 через MediaMTX и остановка публикации, сенсоры x500_gimbal, отказ неподдерживаемого PATCH, world-reset и reboot |
+
+Последний прогон после рефакторинга: 15 unit-тестов прошли; оба контейнерных скрипта прошли; сервис healthy. После reboot оставался один Gazebo и ни одного FFmpeg. Матрица не означает проверку всех отказов: отдельные сценарии аварии FFmpeg, нескольких независимых камер, нескольких одновременных RTSP-читателей и медленного WebSocket-клиента ещё нужно расширить.
+
+## Структура приложения
+
+[`app/main.py`](app/main.py) содержит `create_app`, настройку lifespan и подключение маршрутов. Схемы, конфигурация и записи сущностей размещены в отдельных модулях. HTTP API разбит на routers в [`app/api`](app/api); сценарии мира, дронов, сенсоров и камер находятся в [`app/services`](app/services).
+
+[`RuntimeCoordinator`](app/runtime.py) собирает сервисы и управляет поколением мира. Общие записи хранятся в `SessionState`; [`GazeboProcess`](app/gazebo/process.py) владеет группой процессов и логом; [`GazeboClient`](app/gazebo/client.py) скрывает детали Gazebo Transport и wrapper’а; [`PoseTracker`](app/gazebo/poses.py) владеет подпиской поз; sensor service и camera service отвечают за свои подписки и FFmpeg. Модели и исходные частоты сенсоров читает [`ModelCatalog`](app/catalog.py). Нативный GIL-адаптер расположен в [`app/native`](app/native), декодер состояния — в [`app/gazebo/state.py`](app/gazebo/state.py).
+
+Порядок разбиения и инварианты описаны в [плане рефакторинга](docs/refactoring-plan.md). Маршруты и их JSON-контракт остаются прежними; unit API теперь создаётся с fake runtime через `create_app`, без глобального singleton.

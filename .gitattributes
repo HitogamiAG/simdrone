@@ -1,0 +1,10 @@
+models/x500_base/meshes/NXP-HGD-CF.dae filter=lfs diff=lfs merge=lfs -text
+models/OakD-Lite/meshes/OakDLite.dae filter=lfs diff=lfs merge=lfs -text
+models/px4vision/meshes/body.dae filter=lfs diff=lfs merge=lfs -text
+models/standard_vtol/meshes/x8_wing.dae filter=lfs diff=lfs merge=lfs -text
+models/x500_base/materials/textures/CF.png filter=lfs diff=lfs merge=lfs -text
+models/x500_base/meshes/CF.png filter=lfs diff=lfs merge=lfs -text
+models/omnicopter/meshes/omnicopter.stl filter=lfs diff=lfs merge=lfs -text
+models/gimbal/meshes/cgo3_mount_remeshed_v1.stl filter=lfs diff=lfs merge=lfs -text
+models/gimbal_camera/meshes/cgo3_mount_remeshed_v1.stl filter=lfs diff=lfs merge=lfs -text
+models/empty/empty.blend filter=lfs diff=lfs merge=lfs -text

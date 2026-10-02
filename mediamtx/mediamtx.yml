@@ -1,0 +1,42 @@
+logLevel: info
+logDestinations: [stdout]
+readTimeout: 10s
+writeTimeout: 10s
+writeQueueSize: 256
+udpMaxPayloadSize: 1452
+rtsp: yes
+rtspAddress: :8554
+rtspTransports: [udp]
+rtpAddress: :8000
+rtcpAddress: :8001
+api: yes
+apiAddress: :9997
+authMethod: internal
+authInternalUsers:
+  - user: any
+    pass:
+    ips: []
+    permissions:
+      - action: publish
+        path: '~^drones/[^/]+/sensors/[^/]+$'
+      - action: read
+        path: '~^drones/[^/]+/sensors/[^/]+$'
+  - user: uav-api
+    pass: local-only-change-me
+    ips: []
+    permissions:
+      - action: api
+metrics: no
+pprof: no
+hls: yes
+hlsAddress: :8888
+webrtc: no
+srt: no
+paths:
+  '~^drones/([^/]+)/sensors/([^/]+)$':
+    source: publisher
+    runOnDemand: /app/hook.sh activate
+    runOnDemandRestart: no
+    runOnDemandStartTimeout: 20s
+    runOnDemandCloseAfter: 5s
+    runOnUnDemand: /app/hook.sh deactivate

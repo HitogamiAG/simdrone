@@ -1,0 +1,45 @@
+services:
+  gazebo-service:
+    build:
+      context: .
+      dockerfile: gazebo-service/Dockerfile
+    image: uav-gazebo-service:local
+    env_file: .env
+    environment:
+      WORLD_SDF: /opt/uav/third-party/worlds/${WORLD_FILE:-empty.sdf}
+      MODEL_ROOTS: /opt/uav/third-party/models:/opt/uav/models:/opt/uav/app/models
+      GZ_SIM_RESOURCE_PATH: /opt/uav/models:/opt/uav/third-party/models:/opt/uav/app/models
+      MEDIAMTX_RTSP_HOST: localhost
+    ports:
+      - "${API_PORT:-8000}:8000"
+    depends_on:
+      mediamtx:
+        condition: service_started
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 20s
+    shm_size: 1gb
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/healthz"]
+      interval: 10s
+      timeout: 4s
+      start_period: 120s
+      retries: 12
+
+  mediamtx:
+    build:
+      context: .
+      dockerfile: mediamtx/Dockerfile
+    image: uav-mediamtx:local
+    ports:
+      - "${RTSP_PORT:-8554}:8554/tcp"
+      - "${RTP_PORT:-8000}:8000/udp"
+      - "${RTCP_PORT:-8001}:8001/udp"
+      - "${HLS_PORT:-8888}:8888/tcp"
+    expose:
+      - "9997"
+    environment:
+      API_BASE: http://gazebo-service:8000
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 5s
