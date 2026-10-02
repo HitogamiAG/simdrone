@@ -36,6 +36,7 @@ curl -X POST http://localhost:8002/api/v1/instances/ \
 | POST | `/api/v1/instances/{id}/stop` | Остановка процессов с сохранением instance, слота и каталога параметров |
 | POST | `/api/v1/instances/{id}/start` | Запуск сохранённого instance |
 | GET / PATCH | `/api/v1/instances/{id}/parameters/` | Чтение / изменение разрешённых параметров |
+| WebSocket | `/api/v1/instances/{id}/logs` | Live stdout/stderr PX4 без истории |
 | WebSocket | `/api/v1/instances/{id}/telemetry` | Поток телеметрии |
 | GET | `/healthz` | Готовность процесса Hub, независимо от Gazebo |
 
@@ -162,3 +163,13 @@ docker compose build --progress plain px4-hub
 - `mavsdk-grpc==3.17.4` поставляет отдельный `mavsdk_server`; `mavsdk==4.0.3` больше не является gRPC-клиентом. `websockets==15.0.1` требуется Uvicorn для обслуживания telemetry WebSocket.
 - `gz topic -l` из контейнера Hub показал `/world/empty/clock` и сенсорные топики модели; оба контейнера используют `GZ_PARTITION=uav-sim` и одну Compose-сеть.
 - Полный интеграционный прогон Hub и Gazebo Service описан в разделе «Проверки» выше.
+
+## Live-логи процессов
+
+`WS /api/v1/instances/{instance_id}/logs` передаёт только новые строки объединённых stdout/stderr PX4. История и replay отсутствуют; диагностические файлы продолжают записываться по прежним правилам и через этот API не доступны. Сообщение: `{"type":"log","source":"px4","received_at":"UTC ISO8601","message":"текст"}`. ANSI CSI-коды удаляются, некорректный UTF-8 заменяется; длинные строки делятся на фрагменты до 8192 байт. Severity не определяется.
+
+Вывод непрерывно читается с момента запуска, даже без зрителей. У каждого подписчика очередь до 128 записей; при переполнении старые строки отбрасываются, перед следующими строками приходит `{"type":"gap","dropped":N}`. Это буфер доставки, а не история. Завершение процесса, stop/reset/reboot/shutdown закрывает поток с кодом 1012; следующий запуск требует новой подписки. Пауза симуляции не останавливает чтение логов. Во время starting подписка доступна, как только PX4 запущен; остановленный instance не предоставляет поток. MAVSDK и ULog в этот API не входят.
+
+Тесты live-логов: `tests/test_live_logs.py` (fanout, отсутствие replay, переполнение, ограничение строк, непрерывное чтение настоящего дочернего процесса без подписчиков и cleanup). Эти тестовые процессы не заменяют интеграционную проверку Gazebo/PX4.
+
+Проверка 03.10.2026 в Docker: Hub contract/lifecycle/diagnostics + live logs — **25 passed**. Закрытие процесса отменяет заблокированную отправку WebSocket и освобождает подписчиков.

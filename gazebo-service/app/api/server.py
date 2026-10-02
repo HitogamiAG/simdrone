@@ -1,4 +1,4 @@
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, WebSocket
 
 router = APIRouter()
 
@@ -14,3 +14,9 @@ def server_alive(request: Request): return request.app.state.runtime.status()
 
 @router.post("/api/v1/server/server-reboot/")
 def server_reboot(request: Request): return request.app.state.runtime.reboot()
+
+
+@router.websocket("/api/v1/world/logs")
+async def world_logs(websocket: WebSocket):
+    from ..live_logs import serve_logs
+    await serve_logs(websocket, websocket.app.state.runtime.process_manager.logs)

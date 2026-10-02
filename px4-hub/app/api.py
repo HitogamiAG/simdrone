@@ -110,6 +110,16 @@ async def telemetry(instance_id: str, websocket: WebSocket):
         fanout.unsubscribe(queue)
 
 
+@router.websocket("/api/v1/instances/{instance_id}/logs")
+async def instance_logs(instance_id: str, websocket: WebSocket):
+    from .live_logs import serve_logs
+    record = websocket.app.state.service.instances.get(instance_id)
+    if record is None or record.logs is None or record.logs.closed:
+        await websocket.close(code=1008, reason="instance logs are unavailable")
+        return
+    await serve_logs(websocket, record.logs)
+
+
 def create_app(settings=None, service_factory=None):
     from contextlib import asynccontextmanager
     from .config import Settings

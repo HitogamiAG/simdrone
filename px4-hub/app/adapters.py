@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 from .processes import prepare_rootfs, stop_process
 from .telemetry import TelemetryFanout
+from .live_logs import LiveLogs, LineDecoder
 
 
 class Px4Adapter:
@@ -27,10 +28,11 @@ class Px4Adapter:
             "PX4_SYS_AUTOSTART": "4019", "PX4_SIM_MODEL": "x500_gimbal",
             "PX4_SIMULATOR": "gz", "GZ_PARTITION": self.settings.partition,
         }
-        with (workdir / "px4.log").open("ab") as log:
-            record.px4_process = await asyncio.create_subprocess_exec(
+        record.logs = LiveLogs("px4")
+        record.px4_process = await asyncio.create_subprocess_exec(
                 str(self.settings.px4_binary), "-i", str(record.slot), cwd=workdir, env=env,
-                stdout=log, stderr=asyncio.subprocess.STDOUT, start_new_session=True)
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, start_new_session=True)
+        record.log_reader = asyncio.create_task(self._read_output(record.px4_process, record.logs, workdir / "px4.log"))
         # MAVSDK only exposes its gRPC server after discovering a MAVLink system.
         # Start PX4 first so connect() cannot wait for a server that is waiting for PX4.
         record.system = System(mavsdk_server_address="127.0.0.1", port=record.grpc_port)
@@ -47,11 +49,31 @@ class Px4Adapter:
         if record.px4_process.returncode is not None or record.mavsdk_process.returncode is not None:
             raise RuntimeError("PX4 or MAVSDK process exited during startup")
 
+    async def _read_output(self, process, logs, path):
+        decoder = LineDecoder(logs)
+        try:
+            with path.open("ab", buffering=0) as logfile:
+                while chunk := await process.stdout.read(4096):
+                    try:
+                        logfile.write(chunk)
+                    except OSError:
+                        pass
+                    decoder.feed(chunk)
+                decoder.finish()
+        finally:
+            logs.close()
+
     async def stop(self, record):
         if record.telemetry:
             await record.telemetry.close()
         await stop_process(record.px4_process, self.settings.stop_timeout)
         await stop_process(record.mavsdk_process, self.settings.stop_timeout)
+        if record.logs:
+            record.logs.close()
+        if record.log_reader:
+            record.log_reader.cancel()
+            await asyncio.gather(record.log_reader, return_exceptions=True)
+            record.log_reader = None
         record.px4_process = record.mavsdk_process = None
         record.system = record.telemetry = None
 

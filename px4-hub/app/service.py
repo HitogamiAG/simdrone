@@ -26,6 +26,8 @@ class Instance:
     mavsdk_process: asyncio.subprocess.Process | None = None
     system: object | None = None
     telemetry: object | None = None
+    logs: object | None = None
+    log_reader: asyncio.Task | None = None
     saved_parameters: dict | None = None
     monitor: asyncio.Task | None = None
     operation_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
