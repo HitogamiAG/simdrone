@@ -15,6 +15,7 @@ class Drone:
     model: str
     pose: dict
     gazebo_id: str | None = None
+    gazebo_create_attempted: bool = False
     instance_id: str | None = None
     status: str = "creating"
     autopilot_wanted: bool = True
@@ -96,6 +97,13 @@ class Platform:
             raise BackendError(409, "simulation_paused", "Operation requires a running simulation")
         return world
 
+    async def _assert_name_available(self, name):
+        existing = await self.gazebo.drones()
+        collision = next((drone for drone in existing if drone.get("name") == name), None)
+        if collision:
+            raise BackendError(409, "drone_name_conflict", "A Gazebo model with this name already exists",
+                               {"name": name, "gazebo_drone_id": collision.get("id")})
+
     async def _rates(self, gazebo_id):
         sensors = await self.gazebo.sensors(gazebo_id)
         return {sensor["id"]: sensor.get("update_rate") for sensor in sensors}
@@ -108,13 +116,16 @@ class Platform:
                 sensor["video"] = await self.video(item.id, sensor["id"])
         return value
 
-    def _serialize(self, item: Drone, gazebo=None, autopilot=None):
+    def _serialize(self, item: Drone, gazebo=None, autopilot=None, *, gazebo_error=None, autopilot_error=None):
         return {"id": item.id, "name": item.name, "model": item.model, "status": item.status,
                 "simulation": {"drone_id": item.gazebo_id,
-                               "pose": (gazebo or {}).get("pose", item.pose),
+                               "pose": (gazebo or {}).get("pose") if item.gazebo_id else item.pose,
                                "entity_id": (gazebo or {}).get("entity_id"),
-                               "sensors": (gazebo or {}).get("sensors", [])},
-                "autopilot": autopilot or {"status": "stopped" if not item.instance_id else "unknown"},
+                               "sensors": (gazebo or {}).get("sensors", []),
+                               "available": gazebo is not None,
+                               "error": gazebo_error},
+                "autopilot": autopilot or {"status": "stopped" if not item.instance_id else "unknown",
+                                            "error": autopilot_error},
                 "binding": {"valid": bool(gazebo and item.gazebo_id),
                             "generation": item.generation},
                 "capabilities": {"flight_control": False, "missions": False, "manual_control": False},
@@ -130,11 +141,18 @@ class Platform:
         item = self.drones.get(drone_id)
         if not item:
             raise BackendError(404, "drone_not_found", "Drone was not found")
-        gazebo = await self._present_gazebo(item) if item.gazebo_id else None
-        px4 = await self.hub.get(item.instance_id) if item.instance_id else None
-        if px4:
-            item.autopilot_wanted = px4.get("status") not in {"stopped"}
-        return self._serialize(item, gazebo, px4)
+        gazebo, px4, gazebo_error, autopilot_error = None, None, None, None
+        if item.gazebo_id:
+            try:
+                gazebo = await self._present_gazebo(item)
+            except BackendError as exc:
+                gazebo_error = {"code": exc.code, "message": exc.message, "details": exc.details}
+        if item.instance_id:
+            try:
+                px4 = await self.hub.get(item.instance_id)
+            except BackendError as exc:
+                autopilot_error = {"code": exc.code, "message": exc.message, "details": exc.details}
+        return self._serialize(item, gazebo, px4, gazebo_error=gazebo_error, autopilot_error=autopilot_error)
 
     async def create_drone(self, body):
         async with self.lock:
@@ -145,6 +163,8 @@ class Platform:
             gazebo = None
             try:
                 await self._running()
+                await self._assert_name_available(item.name)
+                item.gazebo_create_attempted = True
                 gazebo = await self.gazebo.create_drone({"model": item.model, "name": item.name, "pose": item.pose})
                 item.gazebo_id = gazebo["id"]
                 item.initial_sensor_rates = await self._rates(item.gazebo_id)
@@ -165,22 +185,45 @@ class Platform:
 
     async def _cleanup_known(self, item):
         failures = []
-        if item.instance_id is None:
+        hub_lookup_complete = item.instance_id is not None or item.gazebo_id is None
+        if item.gazebo_id is None and item.gazebo_create_attempted:
+            try:
+                models = await self.gazebo.drones()
+                matches = [model for model in models
+                           if model.get("name") == item.name and model.get("model") == item.model]
+                if len(matches) == 1:
+                    item.gazebo_id = matches[0].get("id")
+                elif len(matches) > 1:
+                    failures.append({"resource": "gazebo_lookup", "error": "ambiguous model name",
+                                     "matches": [model.get("id") for model in matches]})
+            except Exception as exc:
+                failures.append({"resource": "gazebo_lookup", "error": str(exc)})
+        if item.instance_id is None and item.gazebo_id is not None:
             try:
                 instances = await self.hub.instances()
+                hub_lookup_complete = True
                 orphan = next((entry for entry in instances
                                if entry.get("binding", {}).get("drone_id") == item.gazebo_id), None)
                 if orphan: item.instance_id = orphan["id"]
             except Exception as exc:
                 failures.append({"resource": "px4_lookup", "error": str(exc)})
         if item.instance_id:
-            try: await self.hub.delete(item.instance_id)
-            except Exception as exc: failures.append({"resource": "px4", "error": str(exc)})
+            try:
+                await self.hub.delete(item.instance_id)
+            except BackendError as exc:
+                if exc.status == 404:
+                    item.instance_id = None
+                else:
+                    failures.append({"resource": "px4", "error": str(exc)})
+            except Exception as exc:
+                failures.append({"resource": "px4", "error": str(exc)})
             else: item.instance_id = None
-        if item.gazebo_id:
+        if item.gazebo_id and item.instance_id is None and hub_lookup_complete:
             try: await self.gazebo.delete_drone(item.gazebo_id)
             except Exception as exc: failures.append({"resource": "gazebo", "error": str(exc)})
             else: item.gazebo_id = None
+        elif item.gazebo_id and not hub_lookup_complete:
+            failures.append({"resource": "gazebo", "error": "PX4 resource state is unknown; model was preserved"})
         if not failures:
             self.drones.pop(item.id, None)
         elif item.last_error is not None:
@@ -367,9 +410,17 @@ class Platform:
                 "protocol": "WHEP", "on_demand": True}
 
     async def sensor_action(self, drone_id, sensor_id, action):
-        item = self._record(drone_id)
-        path = f"/api/v1/drones/{item.gazebo_id}/sensors/{sensor_id}/{action}"
-        return await self.gazebo.call("POST", path, missing="sensor_not_found")
+        async with self.lock:
+            item = self._record(drone_id)
+            sensor = await self.gazebo.sensor(item.gazebo_id, sensor_id)
+            if sensor.get("type") != "camera":
+                raise BackendError(422, "not_a_camera", "Camera actions are available only for camera sensors")
+            self.operation = f"camera_{action}"
+            try:
+                path = f"/api/v1/drones/{item.gazebo_id}/sensors/{sensor_id}/{action}"
+                return await self.gazebo.call("POST", path, missing="sensor_not_found")
+            finally:
+                self.operation = None
 
     async def _stop_all_instances(self):
         for instance in await self.hub.instances():
@@ -398,8 +449,10 @@ class Platform:
             if remaining:
                 raise BackendError(409, "configured_world_contains_drone", "Reset world contains drone models",
                                    {"drones": [d.get("name") for d in remaining]})
+            world = await self.gazebo.world()
             self.drones.clear()
             self.world_generation += 1
+            self.startup_world_check = {"ready": True, "world": world.get("name")}
             return result
         except Exception as exc:
             for item in self.drones.values():

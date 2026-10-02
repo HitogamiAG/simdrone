@@ -1,12 +1,7 @@
 import asyncio
-from fastapi import APIRouter, FastAPI, Request, WebSocket, WebSocketDisconnect
-from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
-from .config import Settings
-from .errors import BackendError, error_response
-from .realtime import Realtime
+from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
+from .errors import BackendError
 from .schemas import DroneCreate, ParameterPatch, SensorPatch, WorldPatch
-from .service import Platform
 
 router = APIRouter()
 
@@ -183,30 +178,3 @@ async def realtime_socket(ws: WebSocket):
 async def _drop(realtime, subscriptions, channel):
     queue = subscriptions.pop(channel, None)
     if queue is not None: await realtime.unsubscribe(channel, queue)
-
-
-def create_app(settings=None, platform_factory=None):
-    from contextlib import asynccontextmanager
-    config = settings or Settings()
-    factory = platform_factory or Platform
-    @asynccontextmanager
-    async def lifespan(app):
-        platform = factory(config)
-        app.state.platform = platform
-        app.state.realtime = Realtime(platform)
-        platform.realtime = app.state.realtime
-        platform.startup_world_check = await platform.ready()
-        try: yield
-        finally:
-            await app.state.realtime.close()
-            await platform.close()
-    app = FastAPI(title="UAV Platform Backend", version="0.1.0", lifespan=lifespan)
-    app.include_router(router)
-    app.add_exception_handler(BackendError, error_response)
-    async def validation_error(_, exc: RequestValidationError):
-        return JSONResponse({"error": {"code": "invalid_input", "message": "Request validation failed", "details": exc.errors()}}, status_code=422)
-    app.add_exception_handler(RequestValidationError, validation_error)
-    return app
-
-
-app = create_app()
