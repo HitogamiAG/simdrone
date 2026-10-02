@@ -61,13 +61,14 @@ docker compose build backend px4-hub gazebo-service
 docker compose up -d --no-deps backend px4-hub gazebo-service mediamtx
 docker run --rm --network none -v "$PWD/backend:/work:ro" -w /work -e PYTHONPATH=/work --entrypoint pytest uav-platform-backend:local -q -p no:cacheprovider tests/test_platform.py
 docker run --rm --network uav-simulation -v "$PWD/backend/tests:/tests:ro" -w /tests --entrypoint python uav-platform-backend:local integration.py
+docker run --rm --network uav-simulation -v "$PWD/backend/tests:/tests:ro" -w /tests --entrypoint python uav-platform-backend:local realtime_integration.py
 docker compose exec -T gazebo-service pytest -q /opt/uav/tests/test_contract.py
 docker compose exec -T gazebo-service python /opt/uav/tests/regression.py
 docker compose exec -T gazebo-service python /opt/uav/tests/smoke.py
 docker compose config --quiet
 ```
 
-`tests/integration.py` проверяет живые create, PX4 parameter PATCH + stop/start/restart, sensor PATCH, drone-reset, паузу, world PATCH и reset. Интеграция меняет мир; запускать без параллельных клиентов. Браузерный тест WHEP находится в `tests/webrtc_browser.js`, Dockerfile фиксирует Chrome и Playwright. В Docker Chrome получил и декодировал кадр 1280×720; два зрителя разделили одну публикацию, закрытие первого не остановило второго, уход последнего выключил камеру. RTSP/H.264 smoke запускается отдельно и не заменяет проверку браузера.
+`tests/integration.py` проверяет живые create, PX4 parameter PATCH + stop/start/restart, sensor PATCH, drone-reset, паузу, world PATCH и reset. `tests/realtime_integration.py` проверяет два клиента одного канала, медленного читателя и invalidation при DELETE. Скрипты меняют мир; запускать без параллельных клиентов. Браузерный тест WHEP находится в `tests/webrtc_browser.js`, Dockerfile фиксирует Chrome и Playwright. В Docker Chrome получил и декодировал кадр 1280×720; два зрителя разделили одну публикацию, закрытие первого не остановило второго, уход последнего выключил камеру. RTSP/H.264 smoke запускается отдельно и не заменяет проверку браузера.
 
 Сборка и запуск браузерной проверки:
 

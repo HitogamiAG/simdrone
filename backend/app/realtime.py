@@ -45,26 +45,32 @@ class Realtime:
     def __init__(self, platform):
         self.platform = platform
         self.channels = {}
+        self.lock = asyncio.Lock()
 
     async def subscribe(self, channel):
-        entry = self.channels.get(channel)
-        if entry is None:
-            upstream, resource = await self._upstream(channel)
-            task = asyncio.create_task(self._pump(channel, upstream, resource))
-            entry = self.channels[channel] = {"queues": set(), "upstream": upstream, "task": task,
-                                               "generation": resource.generation}
-        queue = LatestByType()
-        entry["queues"].add(queue)
-        return queue
+        async with self.lock:
+            entry = self.channels.get(channel)
+            if entry is None:
+                upstream, resource = await self._upstream(channel)
+                task = asyncio.create_task(self._pump(channel, upstream, resource))
+                entry = self.channels[channel] = {"queues": set(), "upstream": upstream, "task": task,
+                                                   "generation": resource.generation}
+            queue = LatestByType()
+            entry["queues"].add(queue)
+            return queue
 
     async def unsubscribe(self, channel, queue):
-        entry = self.channels.get(channel)
-        if entry is None: return
-        entry["queues"].discard(queue)
-        if not entry["queues"]:
-            self.channels.pop(channel, None)
-            entry["task"].cancel()
-            await asyncio.gather(entry["task"], return_exceptions=True)
+        task = None
+        async with self.lock:
+            entry = self.channels.get(channel)
+            if entry is None: return
+            entry["queues"].discard(queue)
+            if not entry["queues"]:
+                self.channels.pop(channel, None)
+                task = entry["task"]
+                task.cancel()
+        if task:
+            await asyncio.gather(task, return_exceptions=True)
 
     async def close(self):
         entries = list(self.channels.values())
@@ -73,15 +79,16 @@ class Realtime:
         await asyncio.gather(*(entry["task"] for entry in entries), return_exceptions=True)
 
     async def invalidate_drone(self, drone_id):
-        entries = [(channel, entry) for channel, entry in self.channels.items()
-                   if channel.startswith(f"drone.{drone_id}.")]
-        for channel, entry in entries:
-            self.channels.pop(channel, None)
-            for queue in tuple(entry["queues"]):
-                queue.clear()
-                queue.put_nowait({"channel": channel, "type": "invalidated",
-                                  "world_generation": self.platform.world_generation})
-            entry["task"].cancel()
+        async with self.lock:
+            entries = [(channel, entry) for channel, entry in self.channels.items()
+                       if channel.startswith(f"drone.{drone_id}.")]
+            for channel, entry in entries:
+                self.channels.pop(channel, None)
+                for queue in tuple(entry["queues"]):
+                    queue.clear()
+                    queue.put_nowait({"channel": channel, "type": "invalidated",
+                                      "world_generation": self.platform.world_generation})
+                entry["task"].cancel()
         await asyncio.gather(*(entry["task"] for _, entry in entries), return_exceptions=True)
 
     async def invalidate_all(self):

@@ -191,6 +191,7 @@ class Platform:
             item = self._record(drone_id)
             self.operation, item.status = "delete_drone", "deleting"
             try:
+                await self._invalidate(item)
                 if item.instance_id:
                     try: await self.hub.delete(item.instance_id)
                     except BackendError as exc:
