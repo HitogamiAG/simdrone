@@ -198,6 +198,10 @@ Python-зависимости перечислены в [`requirements.txt`](req
 
 Сервис собирает небольшой [нативный адаптер Transport](app/native/transport_request.cc), освобождающий GIL во время блокирующего запроса и unsubscribe. Стандартный Python binding Transport 13 удерживает GIL при запросе, тогда как callbacks подписок требуют его, что приводило к таймаутам при активных подписках. Transport-запросы и ожидания выполняются вне HTTP event loop.
 
+Для полётов с ненулевым `spherical_coordinates.heading_deg` образ также собирает исправленные NavSat и Magnetometer из исходников Gazebo Sim **8.15.0**, commit `446a44335a45b704b4d36dabcc5508ee34eeb3d8`. [Сборочный патч](build/patch_georeferenced_sensors.py) устраняет рассогласование сенсоров: штатный NavSat преобразует положение в WGS84, но выдаёт скорость в осях мира как географическую ENU; штатный Magnetometer не поворачивает географическое поле в оси мира. Исправление использует нативный `SphericalCoordinates::VelocityTransform` с `LOCAL2`, сохраняя соглашения магнитометра для PX4 v1.16. Версии Gazebo и PX4 не меняются.
+
+В `empty.sdf` явно выбраны `simdrone-navsat-system` и `simdrone-magnetometer-system`, расположенные в `/opt/uav/georeferenced-plugins`; одноимённые штатные библиотеки не заменяются. Для своего SDF необходимо выбрать эти же два filename, сохранив имена классов `gz::sim::systems::NavSat` / `Magnetometer`. Исходники зависимости скачиваются только при сборке по закреплённому commit и удаляются после компиляции; каталога `third-party` не требуется. Публичный API, параметры геопривязки и reset-семантика сохраняются. Результаты реальных полётов: [flight-testing.md](../docs/flight-testing.md).
+
 ## Ошибки
 
 Ошибки ресурсных API имеют формат:
@@ -225,6 +229,8 @@ docker compose exec -T gazebo-service python /opt/uav/tests/smoke.py
 | `smoke.py` | Старт и готовность, pause/resume, создание с начальной позой/reset/delete, sensor WebSocket и rate PATCH, on-demand получение и декодирование H.264 через MediaMTX и остановка публикации, сенсоры x500_gimbal, отказ неподдерживаемого PATCH, world-reset и reboot |
 
 Проверка 04.10.2026: Gazebo contract — **15 passed**, `regression.py` и `smoke.py` прошли на обновлённом контейнере с реальными Gazebo Transport и MediaMTX. Это подтвердило загрузку локальных world/model ресурсов, наблюдаемые изменения мира, сенсоры и H.264 RTSP. Браузерный Chrome ранее получил и декодировал WHEP H.264 кадр 1280×720; два клиента разделили одну публикацию, уход первого не прервал второго, уход последнего привёл к camera deactivate. Отдельные сценарии аварии FFmpeg, нескольких независимых камер и медленного Backend WebSocket-клиента ещё нужно расширить.
+
+После исправления сенсорных координат при ненулевом heading повторно пересобран изолированный стенд: contract — **15/15**, `regression.py` и `smoke.py` прошли последовательно с настоящими Gazebo Transport и MediaMTX. Реальная миссия при сменённых origin/elevation/heading=90° прошла точки по порядку и села в **0,084 м** от станции. Базовые миссия и Offboard также проверялись; результаты и неуспешные диагностические прогоны перечислены в [flight-testing.md](../docs/flight-testing.md).
 
 ## Структура приложения
 

@@ -29,6 +29,30 @@ COPY gazebo-service/requirements.txt /opt/uav/requirements.txt
 RUN python3 -m venv --system-site-packages /opt/venv && \
     /opt/venv/bin/pip install --no-cache-dir -r requirements.txt
 
+# Sim 8.15.0 rotates NavSat positions, but not velocity / magnetic vectors.
+# Rebuild only these two plugins against the installed, unchanged Gazebo ABI.
+ARG GZ_SIM_SENSORS_COMMIT=446a44335a45b704b4d36dabcc5508ee34eeb3d8
+COPY gazebo-service/build/patch_georeferenced_sensors.py /tmp/patch_georeferenced_sensors.py
+RUN test "$(pkg-config --modversion gz-sim8)" = "8.15.0" && \
+    mkdir -p /tmp/georeferenced-sensors /opt/uav/georeferenced-plugins && \
+    for sensor in NavSat Magnetometer; do \
+      case "$sensor" in NavSat) directory=navsat ;; Magnetometer) directory=magnetometer ;; esac; \
+      for extension in cc hh; do \
+        curl -fsSL "https://raw.githubusercontent.com/gazebosim/gz-sim/${GZ_SIM_SENSORS_COMMIT}/src/systems/${directory}/${sensor}.${extension}" \
+          -o "/tmp/georeferenced-sensors/${sensor}.${extension}"; \
+      done; \
+    done && \
+    python3 /tmp/patch_georeferenced_sensors.py /tmp/georeferenced-sensors && \
+    for sensor in NavSat Magnetometer; do \
+      case "$sensor" in NavSat) directory=navsat ;; Magnetometer) directory=magnetometer ;; esac; \
+      g++ -O2 -shared -std=c++17 -fPIC \
+        $(pkg-config --cflags gz-sim8 gz-sensors8-${directory} gz-plugin2-register) \
+        "/tmp/georeferenced-sensors/${sensor}.cc" \
+        -o "/opt/uav/georeferenced-plugins/libsimdrone-${directory}-system.so" \
+        $(pkg-config --libs gz-sim8 gz-sensors8-${directory} gz-plugin2-register) || exit 1; \
+    done && rm -rf /tmp/georeferenced-sensors /tmp/patch_georeferenced_sensors.py
+ENV GZ_SIM_SYSTEM_PLUGIN_PATH=/opt/uav/georeferenced-plugins
+
 COPY gazebo-service/app /opt/uav/app
 COPY gazebo-service/tests /opt/uav/tests
 RUN g++ -O2 -shared -std=c++17 -fPIC $(python3-config --includes) \

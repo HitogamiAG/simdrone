@@ -586,6 +586,11 @@ def test_real_mission_rejects_stale_georeference_and_flies_changed_origin(flight
     flight.request("PATCH", "/api/v1/world", expected=(200,), timeout=120,
                    json={"spherical_coordinates": changed})
     created = flight.create_drone(timeout=120)
+    attitude = flight.observers[-1].telemetry(required=("attitude",))["attitude"]
+    gazebo_yaw = math.degrees(yaw_from_pose(flight.gazebo.current(created["name"])))
+    expected_yaw = 90 - changed["heading_deg"] - gazebo_yaw
+    yaw_error = (attitude["yaw_deg"] - expected_yaw + 180) % 360 - 180
+    assert abs(yaw_error) < 15, f"PX4 heading disagrees with Gazebo before arm: {yaw_error:.1f} degrees"
     stale = flight.request("POST", f"/api/v1/missions/{old['id']}/validate", expected=(409,),
                            params={"drone_id": created["id"], "revision": old["revision"]})
     assert stale.json()["error"]["code"] == "mission_world_context_changed"
@@ -600,10 +605,19 @@ def test_real_mission_rejects_stale_georeference_and_flies_changed_origin(flight
     state, _ = flight.wait_execution(created["id"], accepted["execution_id"], "completed", MISSION_TIMEOUT)
     assert state["status"] == "completed"
     pose_records = [r["position"] for r in flight.gazebo.records if r["name"] == created["name"]]
-    for waypoint in points:
-        assert any(math.hypot(p["x"] - waypoint["x"], p["y"] - waypoint["y"]) <= 2 and
-                   abs(p["z"] - waypoint["z"]) <= 1.5 for p in pose_records), waypoint
+    reached = 0
+    for pose in pose_records:
+        waypoint = points[reached]
+        if (math.hypot(pose["x"] - waypoint["x"], pose["y"] - waypoint["y"]) <= 2
+                and abs(pose["z"] - waypoint["z"]) <= 1.5):
+            reached += 1
+            if reached == len(points):
+                break
+    assert reached == len(points), f"Changed-origin route physically reached {reached}/4 waypoints in order"
     assert flight.wait_landed(created["id"], flight.native_geodetic(created["simulation"]["pose"]["position"]))["armed"] is False
+    ground = created["simulation"]["pose"]["position"]
+    landed_pose = flight.gazebo.current(created["name"])["position"]
+    assert math.hypot(landed_pose["x"] - ground["x"], landed_pose["y"] - ground["y"]) <= 3, landed_pose
 
 
 def test_real_mission_can_be_cancelled_immediately_after_acceptance(flight):
