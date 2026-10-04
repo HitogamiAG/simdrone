@@ -132,6 +132,25 @@ def test_watchdog_retries_rtl_until_telemetry_confirms_mode():
     asyncio.run(scenario())
 
 
+def test_watchdog_releases_offboard_session_after_confirmed_local_landing():
+    async def scenario():
+        controller, _record, _calls = _safety_fixture()
+        created = await controller.create_session()
+        session = controller.session
+        session.armed = False
+        session.status = "landing"
+        assert controller._landed_and_disarmed()
+        await asyncio.sleep(.15)
+        assert controller.session is None
+        assert session.owner_connected is False
+        # A new session can be reserved after the confirmed ground/disarmed state.
+        replacement = await controller.create_session()
+        assert replacement["session_id"] != created["session_id"]
+        await controller.close()
+
+    asyncio.run(scenario())
+
+
 def test_return_remains_available_after_binding_and_armability_are_lost():
     async def scenario():
         class FakeAction:

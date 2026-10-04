@@ -308,6 +308,8 @@ class FlightController:
                     if execution.current < len(mission["waypoints"]):
                         raise RuntimeError("PX4 returned to the station before completing all mission waypoints")
                     break
+                if self._landed_and_disarmed():
+                    raise RuntimeError("PX4 landed and disarmed away from the mission station")
                 # PX4 v1.16 reports the terminal NAV_RETURN_TO_LAUNCH item as
                 # current=N+1,total=N+2 and transitions to RTL without ever
                 # reporting current==total. The final RTL item is success
@@ -362,6 +364,8 @@ class FlightController:
             if self.active is not execution: return
             if self._landed_at_station():
                 return
+            if self._landed_and_disarmed():
+                raise RuntimeError("PX4 landed and disarmed away from the mission station")
             await asyncio.sleep(.25)
         raise TimeoutError("PX4 landing was not confirmed")
 
@@ -388,7 +392,16 @@ class FlightController:
         distance = math.hypot((position["latitude_deg"]-lat)*111320,
             (position["longitude_deg"]-lon)*111320*math.cos(math.radians(lat)),
             float(position["absolute_altitude_m"])-altitude)
-        return distance <= 5
+        return distance <= 3
+
+    def _landed_and_disarmed(self):
+        samples = self.telemetry()
+        landed = samples.get("landed_state", {})
+        value = landed.get("landed_state", landed.get("state", landed)) if isinstance(landed, dict) else landed
+        state = str(value).lower()
+        return (samples.get("armed") is False and
+                ("on_ground" in state or state == "2") and
+                self.telemetry_fresh("armed", "landed_state"))
 
     def execution(self, execution_id):
         result = self.executions.get(execution_id)
@@ -627,6 +640,10 @@ class FlightController:
                 if self.closed: return
                 async with self.lock:
                     if self.session is not session or self.closed:
+                        return
+                    if session.status == "landing" and not session.armed and self._landed_and_disarmed():
+                        session.owner_connected = False
+                        self.session = None
                         return
                     if self.service.simulation_paused:
                         if not session.armed:
