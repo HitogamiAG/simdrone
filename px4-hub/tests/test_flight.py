@@ -186,3 +186,149 @@ def test_offboard_session_create_replay_returns_original_token():
         await controller.close()
 
     asyncio.run(scenario())
+
+
+def _safety_fixture(*, fail_start=False):
+    from app.flight import FlightController
+
+    calls = []
+    now = asyncio.get_running_loop().time()
+    latest = {"health": {"is_armable": True}, "armed": False,
+              "landed_state": "ON_GROUND", "position": {}}
+
+    class Action:
+        async def arm(self): calls.append("arm")
+        async def disarm(self): calls.append("disarm")
+        async def land(self): calls.append("land")
+        async def return_to_launch(self): calls.append("rtl")
+
+    class Offboard:
+        async def set_velocity_body(self, _): calls.append("setpoint")
+        async def start(self):
+            calls.append("offboard_start")
+            if fail_start: raise RuntimeError("start rejected")
+        async def stop(self): calls.append("offboard_stop")
+
+    record = SimpleNamespace(id="i", status="running", binding_valid=True,
+        binding_error=None, saved_parameters={}, station_pose=None,
+        telemetry=SimpleNamespace(connected=True, latest=latest,
+            received_by_type={name: now for name in ("position", "health", "armed", "landed_state")} ),
+        system=SimpleNamespace(action=Action(), offboard=Offboard()))
+    service = SimpleNamespace(simulation_paused=False,
+        settings=SimpleNamespace(telemetry_stale_after=5), _get_running=lambda _: record)
+    return FlightController(service, record), record, calls
+
+
+def test_partial_arm_with_delayed_armed_telemetry_requests_rtl():
+    async def scenario():
+        controller, _record, calls = _safety_fixture(fail_start=True)
+        session = await controller.create_session()
+        controller.session.owner_connected = True
+        try:
+            await controller.session_action(session["session_id"], "arm")
+        except RuntimeError:
+            pass
+        assert "rtl" in calls
+        assert controller.session.status == "returning"
+        await controller.close()
+    asyncio.run(scenario())
+
+
+def test_pause_during_offboard_preparation_prevents_arm(monkeypatch):
+    async def scenario():
+        controller, _record, calls = _safety_fixture()
+        session = await controller.create_session()
+        controller.session.owner_connected = True
+        original_sleep = asyncio.sleep
+
+        async def pause_during_prepare(delay):
+            if delay == 1.1:
+                controller.service.simulation_paused = True
+                return await original_sleep(0)
+            return await original_sleep(delay)
+
+        monkeypatch.setattr(asyncio, "sleep", pause_during_prepare)
+        try:
+            await controller.session_action(session["session_id"], "arm")
+        except Exception:
+            pass
+        assert "arm" not in calls
+        await controller.close()
+    asyncio.run(scenario())
+
+
+def test_pause_revokes_unarmed_offboard_session():
+    async def scenario():
+        controller, _record, _calls = _safety_fixture()
+        await controller.create_session()
+        controller.service.simulation_paused = True
+        await asyncio.sleep(.1)
+        assert controller.session is None
+        await controller.close()
+    asyncio.run(scenario())
+
+
+def test_accepted_arm_is_returned_even_if_telemetry_still_says_disarmed():
+    async def scenario():
+        controller, _record, calls = _safety_fixture(fail_start=True)
+        session = await controller.create_session()
+        controller.session.owner_connected = True
+        # Keep the current armed=False sample fresh; an accepted arm still requires RTL
+        # when Offboard.start then fails, because this sample may precede PX4 state change.
+        _record.telemetry.received_by_type["armed"] = asyncio.get_running_loop().time()
+        try: await controller.session_action(session["session_id"], "arm")
+        except RuntimeError: pass
+        assert "rtl" in calls
+        await controller.close()
+    asyncio.run(scenario())
+
+
+def test_land_cancels_inflight_mission_return_task():
+    async def scenario():
+        from app.flight import Execution
+
+        controller, _record, calls = _safety_fixture()
+        execution = Execution("e", "r", "mission", status="returning")
+        controller.active = execution
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def pending_return():
+            entered.set()
+            await release.wait()
+            calls.append("rtl")
+
+        execution.return_task = asyncio.create_task(pending_return())
+        await entered.wait()
+        await controller.action("land", "land-request")
+        release.set()
+        await asyncio.sleep(0)
+        assert calls == ["land"]
+        await controller.close()
+    asyncio.run(scenario())
+
+
+def test_watchdog_and_return_transition_are_serialized():
+    async def scenario():
+        controller, _record, _calls = _safety_fixture()
+        created = await controller.create_session()
+        session = controller.session
+        session.armed, session.status = True, "active"
+        session.last_input = time.monotonic() - 1
+        entered, release = asyncio.Event(), asyncio.Event()
+        original = controller._send_velocity
+
+        async def delayed_neutral(*axes):
+            entered.set()
+            await release.wait()
+            await original(*axes)
+
+        controller._send_velocity = delayed_neutral
+        await entered.wait()
+        returning = asyncio.create_task(controller.action("return", "return-request"))
+        await asyncio.sleep(.02)
+        release.set()
+        await returning
+        await asyncio.sleep(.08)
+        assert session.status == "returning"
+        await controller.delete_session(created["session_id"])
+    asyncio.run(scenario())

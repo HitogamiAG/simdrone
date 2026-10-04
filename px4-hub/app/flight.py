@@ -397,8 +397,15 @@ class FlightController:
                     result = await self._cancel(self.active.id)
                     self.action_requests[request_id] = (action, result)
                     return result
-                if self.active.task: self.active.task.cancel()
+            if action == "land" and self.active:
+                # A previously accepted RTL must not continue after land was requested.
                 self.active.status, self.active.phase = "interrupted", "interrupted"
+                for task in (self.active.task, self.active.return_task):
+                    if task and task is not asyncio.current_task() and not task.done():
+                        task.cancel()
+                await asyncio.gather(*(task for task in (self.active.task, self.active.return_task)
+                                       if task and task is not asyncio.current_task()),
+                                     return_exceptions=True)
             if self.session and self.session.armed:
                 await self.record.system.offboard.stop()
                 self.session.armed = False
@@ -453,23 +460,25 @@ class FlightController:
                     raise HubError(409, "offboard_controller_required", "Connect the control WebSocket before arming")
                 await self._send_velocity(0, 0, 0, 0)
                 await asyncio.sleep(1.1)
-                if self.closed:
-                    raise HubError(409, "flight_controller_closed", "Flight controller stopped while preparing Offboard")
+                if self.closed or self.service.simulation_paused or self.session is not session or session.status != "ready":
+                    raise HubError(409, "offboard_session_unavailable", "Offboard preparation was interrupted before arming")
+                command_started = asyncio.get_running_loop().time()
+                arm_accepted = False
                 try:
                     await self.record.system.action.arm()
+                    arm_accepted = True
                     await self.record.system.offboard.start()
                 except Exception:
-                    # Reconcile a partial arm/start instead of leaving an armed aircraft unmanaged.
+                    # An arm command may have reached PX4 even when its response was lost.
                     try: await self.record.system.offboard.stop()
                     except Exception: pass
-                    armed = self.telemetry().get("armed")
-                    armed_at = self.record.telemetry.received_by_type.get("armed") if self.record.telemetry else None
-                    armed_fresh = armed_at is not None and asyncio.get_running_loop().time() - armed_at <= self.service.settings.telemetry_stale_after
-                    if armed is True or not armed_fresh:
+                    armed = True if arm_accepted else await self._armed_after(command_started, timeout=.75)
+                    if armed is not False:
                         session.armed, session.status = True, "returning"
                         try: await self.record.system.action.return_to_launch()
                         except Exception: session.status = "failed"
                     else:
+                        session.armed = False
                         session.status = "failed"
                     raise
                 session.armed, session.status, session.last_input = True, "active", time.monotonic()
@@ -494,6 +503,20 @@ class FlightController:
 
     def _ground_confirmed(self):
         return self.telemetry_fresh("landed_state", "armed") and self._on_ground()
+
+    async def _armed_after(self, started_at, timeout):
+        """Return an armed sample newer than a command, or None if outcome is unknown."""
+        deadline = asyncio.get_running_loop().time() + timeout
+        while asyncio.get_running_loop().time() < deadline:
+            fanout = self.record.telemetry
+            received = fanout.received_by_type.get("armed") if fanout else None
+            if (received is not None and received > started_at and
+                    asyncio.get_running_loop().time() - received <= self.service.settings.telemetry_stale_after):
+                value = fanout.latest.get("armed")
+                if isinstance(value, bool):
+                    return value
+            await asyncio.sleep(.05)
+        return None
 
     @staticmethod
     def _velocity(forward, right, up, yaw):
@@ -539,49 +562,58 @@ class FlightController:
         try:
             while self.session is session:
                 if self.closed: return
-                if session.armed and self.service.simulation_paused:
-                    session.status = "paused"
-                    try: await self._send_velocity(0, 0, 0, 0)
-                    except Exception: pass
-                    await asyncio.sleep(.1)
-                    continue
-                if session.armed and session.status == "paused":
-                    await self.record.system.offboard.stop()
-                    if self._ground_confirmed():
-                        await self.record.system.action.disarm()
-                        session.status, session.armed = "ready", False
-                        self.session = None
-                    else:
-                        await self.record.system.action.return_to_launch()
-                        session.status, session.armed = "returning", False
-                    continue
-                age = time.monotonic() - session.last_input
-                if session.armed and session.status == "active" and age < .5:
-                    await self._send_velocity(*session.latest_input)
-                if session.armed and age >= .5 and session.status == "active":
-                    if time.monotonic() - session.last_input >= .5:
+                async with self.lock:
+                    if self.session is not session or self.closed:
+                        return
+                    if self.service.simulation_paused:
+                        if not session.armed:
+                            session.status = "paused"
+                            session.owner_connected = False
+                            self.session = None
+                            return
+                        session.status = "paused"
                         await self._send_velocity(0, 0, 0, 0)
-                        if time.monotonic() - session.last_input >= .5:
-                            session.status = "input_lost_hold"
-                if session.armed and age >= 5 and session.status == "input_lost_hold":
-                    await self.record.system.offboard.stop()
-                    await self.record.system.action.return_to_launch()
-                    session.status = "returning"
-                    session.armed = False
+                    elif session.armed and session.status == "paused":
+                        await self.record.system.offboard.stop()
+                        if self._ground_confirmed():
+                            await self.record.system.action.disarm()
+                            session.status, session.armed = "ready", False
+                            session.owner_connected = False
+                            self.session = None
+                        else:
+                            await self.record.system.action.return_to_launch()
+                            session.status, session.armed = "returning", False
+                    else:
+                        age = time.monotonic() - session.last_input
+                        if session.armed and session.status == "active" and age < .5:
+                            await self._send_velocity(*session.latest_input)
+                        elif session.armed and age >= .5 and session.status == "active":
+                            await self._send_velocity(0, 0, 0, 0)
+                            if self.session is session and session.status == "active" and time.monotonic() - session.last_input >= .5:
+                                session.status = "input_lost_hold"
+                        elif session.armed and age >= 5 and session.status == "input_lost_hold":
+                            await self.record.system.offboard.stop()
+                            if self.session is session and session.status == "input_lost_hold":
+                                await self.record.system.action.return_to_launch()
+                                session.status = "returning"
+                                session.armed = False
                 await asyncio.sleep(.05)
         except asyncio.CancelledError:
             raise
         except Exception:
-            session.status = "failed"
-            if session.armed:
-                try: await self.record.system.offboard.stop()
-                except Exception: pass
-                try:
-                    await self.record.system.action.return_to_launch()
-                    session.status = "returning"
-                except Exception:
-                    session.status = "failed"
-                session.armed = False
+            async with self.lock:
+                if self.session is not session:
+                    return
+                session.status = "failed"
+                if session.armed:
+                    try: await self.record.system.offboard.stop()
+                    except Exception: pass
+                    try:
+                        await self.record.system.action.return_to_launch()
+                        session.status = "returning"
+                    except Exception:
+                        session.status = "failed"
+                    session.armed = False
 
     async def delete_session(self, session_id, expected_generation=None):
         async with self.lock:

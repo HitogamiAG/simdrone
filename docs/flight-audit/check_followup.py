@@ -36,10 +36,8 @@ async def pause_during_arm_preparation():
         arming = asyncio.create_task(c.session_action(c.session.id, "arm"))
         await asyncio.sleep(.1)  # inside the 1.1 second setpoint preparation
         c.service.simulation_paused = True
-        try:
-            await arming
-        except Exception:
-            pass
+        try: await arming
+        except Exception: pass
         assert "arm" not in calls, f"Arm was executed after pause: {calls}"
 
 
@@ -87,8 +85,10 @@ async def watchdog_races_with_return_command():
 
         c._send_velocity = delayed_neutral
         await entered.wait()
-        await c.action("return", "return-request")
+        returning = asyncio.create_task(c.action("return", "return-request"))
+        await asyncio.sleep(.05)
         release.set()
+        await returning
         await asyncio.sleep(.1)
         assert session.status == "returning", (
             f"Watchdog overwrote RTL state: status={session.status}, calls={calls}")
