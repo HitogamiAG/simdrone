@@ -187,6 +187,46 @@ def test_real_offboard_vertical_motion_zero_hold_and_rtl(flight):
     assert state["armed"] is False
 
 
+def test_real_offboard_three_consecutive_flights_without_reset(flight):
+    created = flight.create_drone()
+    drone_id = created["id"]
+    observer = flight.observers[-1]
+    instance_id = flight.instance_ids[drone_id]
+    model = created["name"]
+    station = flight.native_geodetic(created["simulation"]["pose"]["position"])
+    generation = flight.wait_ready(drone_id)["generation"]
+
+    for flight_number in range(1, 4):
+        landed_state = flight.request("GET", f"/api/v1/drones/{drone_id}/flight").json()
+        assert landed_state["generation"] == generation, "flight generation changed without a drone reset"
+        assert landed_state["armed"] is False and str(landed_state["landed_state"]).lower() in {"on_ground", "2"}
+        initial, _ = event_data(observer, "telemetry")
+        initial_alt = altitude(initial)
+        session = flight.request("POST", f"/api/v1/drones/{drone_id}/flight/offboard/sessions",
+                                  expected=(201,), json={"request_id": str(uuid.uuid4())}).json()
+        ws = control_socket(drone_id, session)
+        try:
+            flight.request("POST", f"/api/v1/drones/{drone_id}/flight/offboard/sessions/{session['session_id']}/arm",
+                           expected=(202,), json={"request_id": str(uuid.uuid4())})
+            seq = drive(ws, 0, 1.5)
+            held, _ = event_data(observer, "telemetry")
+            assert abs(altitude(held) - initial_alt) < .5, \
+                f"flight {flight_number}: neutral arm caused takeoff"
+            seq, airborne = drive_to_altitude(ws, seq, observer, initial_alt, {"up": .65}, target_delta=4)
+            assert altitude(airborne) >= initial_alt + 4, \
+                f"flight {flight_number}: Offboard did not climb"
+            drive(ws, seq, 2, up=0)
+        finally:
+            ws.close()
+
+        flight.request("POST", f"/api/v1/drones/{drone_id}/flight/return", expected=(202,),
+                       json={"request_id": str(uuid.uuid4())})
+        landed = flight.wait_landed(drone_id, station)
+        assert landed["armed"] is False
+        assert flight.instance_ids[drone_id] == instance_id, \
+            f"flight {flight_number}: PX4 instance changed without a drone reset"
+
+
 def test_real_mission_four_waypoints_progress_return_and_replay(flight):
     created = flight.create_drone()
     drone_id = created["id"]
@@ -251,6 +291,51 @@ def test_real_mission_four_waypoints_progress_return_and_replay(flight):
     station = flight.native_geodetic(created["simulation"]["pose"]["position"])
     landed = flight.wait_landed(drone_id, station)
     assert landed["armed"] is False
+
+
+def test_real_mission_three_consecutive_flights_without_reset(flight):
+    created = flight.create_drone()
+    drone_id = created["id"]
+    instance_id = flight.instance_ids[drone_id]
+    model = created["name"]
+    observer = flight.observers[-1]
+    station = flight.native_geodetic(created["simulation"]["pose"]["position"])
+    waypoints = [
+        {"x": 16, "y": -8, "z": 6},
+        {"x": 16, "y": -4, "z": 8},
+        {"x": 12, "y": -4, "z": 7},
+        {"x": 8, "y": -8, "z": 6},
+    ]
+    mission = flight.mission(f"repeat-{uuid.uuid4().hex[:8]}", waypoints)
+    generation = flight.wait_ready(drone_id)["generation"]
+
+    for flight_number in range(1, 4):
+        landed_state = flight.request("GET", f"/api/v1/drones/{drone_id}/flight").json()
+        assert landed_state["generation"] == generation, "flight generation changed without a drone reset"
+        assert landed_state["armed"] is False and str(landed_state["landed_state"]).lower() in {"on_ground", "2"}
+        pose_start = len(flight.gazebo.records)
+        accepted = flight.request("POST", f"/api/v1/drones/{drone_id}/flight/missions", expected=(202,), json={
+            "mission_id": mission["id"], "revision": mission["revision"],
+            "request_id": str(uuid.uuid4())}).json()
+        execution, _ = flight.wait_execution(drone_id, accepted["execution_id"], "completed", MISSION_TIMEOUT)
+        assert execution["status"] == "completed"
+
+        reached = 0
+        poses = [sample["position"] for sample in flight.gazebo.records[pose_start:]
+                 if sample["name"] == model]
+        for pose in poses:
+            target = waypoints[reached]
+            if (math.hypot(pose["x"] - target["x"], pose["y"] - target["y"]) <= 2
+                    and abs(pose["z"] - target["z"]) <= 1.5):
+                reached += 1
+                if reached == len(waypoints):
+                    break
+        assert reached == len(waypoints), \
+            f"flight {flight_number}: only {reached}/{len(waypoints)} waypoints observed in order"
+        landed = flight.wait_landed(drone_id, station)
+        assert landed["armed"] is False
+        assert flight.instance_ids[drone_id] == instance_id, \
+            f"flight {flight_number}: PX4 instance changed without a drone reset"
 
 
 def test_real_offboard_stale_input_stops_then_returns(flight):
