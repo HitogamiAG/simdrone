@@ -35,6 +35,8 @@ run_once() {
     $COMPOSE build flight-runner
     mkdir -p artifacts/flight/control
     rm -f artifacts/flight/control/backend-loss-*.request artifacts/flight/control/backend-loss-*.done
+    rm -f artifacts/flight/control/mavsdk-kill-*.request artifacts/flight/control/mavsdk-kill-*.done
+    rm -f artifacts/flight/control/px4-probe-*.request artifacts/flight/control/px4-probe-*.done
     set +e
     if [ -n "${FLIGHT_TEST_FILTER:-}" ]; then
         $COMPOSE run --rm --no-deps flight-runner python -m pytest -q test_flight.py -k "$FLIGHT_TEST_FILTER" >"artifacts/flight/run-${RUN_INDEX}.log" 2>&1 &
@@ -53,6 +55,41 @@ run_once() {
             $COMPOSE start backend >>"artifacts/flight/run-${RUN_INDEX}.log" 2>&1
             $COMPOSE up -d --wait backend >>"artifacts/flight/run-${RUN_INDEX}.log" 2>&1
             touch "$DONE"
+        done
+        for REQUEST in artifacts/flight/control/mavsdk-kill-*.request; do
+            [ -f "$REQUEST" ] || continue
+            DONE=${REQUEST%.request}.done
+            [ ! -f "$DONE" ] || continue
+            PIDS=$(cat "$REQUEST")
+            MAVSDK_PID=${PIDS%%:*}
+            PX4_PID=${PIDS#*:}
+            case "$MAVSDK_PID:$PX4_PID" in *[!0-9:]*)
+                printf 'Rejected invalid MAVSDK failure request (%s)\n' "$(basename "$REQUEST")" >>"artifacts/flight/run-${RUN_INDEX}.log"
+                printf 'invalid_pids' >"$DONE"
+                continue ;;
+            esac
+            printf 'Host runner terminating MAVSDK PID %s and checking PX4 PID %s (%s)\n' "$MAVSDK_PID" "$PX4_PID" "$(basename "$REQUEST")" >>"artifacts/flight/run-${RUN_INDEX}.log"
+            if $COMPOSE exec -T px4-hub kill -KILL "$MAVSDK_PID" >>"artifacts/flight/run-${RUN_INDEX}.log" 2>&1 && \
+               $COMPOSE exec -T px4-hub kill -0 "$PX4_PID" >>"artifacts/flight/run-${RUN_INDEX}.log" 2>&1; then
+                printf 'px4_alive' >"$DONE"
+            else
+                printf 'px4_not_alive' >"$DONE"
+            fi
+        done
+        for REQUEST in artifacts/flight/control/px4-probe-*.request; do
+            [ -f "$REQUEST" ] || continue
+            DONE=${REQUEST%.request}.done
+            [ ! -f "$DONE" ] || continue
+            PX4_PID=$(cat "$REQUEST")
+            case "$PX4_PID" in *[!0-9]* )
+                printf 'invalid_pid' >"$DONE"
+                continue ;;
+            esac
+            if $COMPOSE exec -T px4-hub kill -0 "$PX4_PID" >>"artifacts/flight/run-${RUN_INDEX}.log" 2>&1; then
+                printf 'px4_alive' >"$DONE"
+            else
+                printf 'px4_not_alive' >"$DONE"
+            fi
         done
         sleep .2
     done

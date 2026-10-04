@@ -161,6 +161,7 @@ class InstanceService:
         async with record.operation_lock:
             if self.instances.get(instance_id) is not record or record.status == "stopping":
                 raise HubError(409, "instance_stopping", "PX4 instance is being deleted")
+            self._reject_restart_during_autonomous_failsafe(record)
             await self._require_running_world()
             # Keep the process monitor active until the snapshot succeeds. If
             # MAVSDK cannot read parameters, restart must leave the live pair
@@ -208,6 +209,7 @@ class InstanceService:
         async with record.operation_lock:
             if self.instances.get(instance_id) is not record:
                 raise HubError(404, "instance_not_found", "PX4 instance does not exist")
+            self._reject_restart_during_autonomous_failsafe(record)
             if record.status == "running":
                 return self.serialize(record)
             if record.status not in {"stopped", "failed"}:
@@ -290,6 +292,13 @@ class InstanceService:
             raise HubError(409, "instance_not_running", "PX4 instance is not running", {"status": record.status})
         return record
 
+    @staticmethod
+    def _reject_restart_during_autonomous_failsafe(record):
+        if (record.status == "failed" and record.px4_process is not None
+                and record.px4_process.returncode is None):
+            raise HubError(409, "px4_autonomous_failsafe_active",
+                           "PX4 is still running after a gateway failure; wait for its failsafe or delete the instance")
+
     async def _require_running_world(self):
         try:
             self.world_name, paused = await self.gazebo.simulation()
@@ -371,6 +380,18 @@ class InstanceService:
                     return
                 process = "PX4" if waits[0] in done else "MAVSDK"
                 record.status, record.last_error = "failed", f"{process} process exited unexpectedly"
+                if process == "MAVSDK" and self._flight_must_remain_autonomous(record):
+                    # PX4 owns the active flight and has its own Offboard-loss
+                    # failsafe. Do not kill it just because its MAVSDK client
+                    # disappeared; keep the instance tracked for explicit
+                    # cleanup while PX4 completes the failsafe autonomously.
+                    if record.flight:
+                        await record.flight.transport_lost()
+                    if record.telemetry:
+                        await record.telemetry.close()
+                    record.telemetry = None
+                    record.system = None
+                    return
                 if record.flight:
                     await record.flight.close()
                 await self.px4.stop(record)
@@ -379,6 +400,17 @@ class InstanceService:
                 if not task.done():
                     task.cancel()
             await asyncio.gather(*waits, return_exceptions=True)
+
+    @staticmethod
+    def _flight_must_remain_autonomous(record):
+        flight = record.flight
+        if flight is None:
+            return False
+        session = getattr(flight, "session", None)
+        if session is not None and session.armed:
+            return True
+        active = getattr(flight, "active", None)
+        return active is not None and active.status in {"preparing", "active", "returning", "landing"}
 
     async def _dispose(self, record, remove_dir):
         record.status = "stopping"
@@ -401,12 +433,15 @@ class InstanceService:
         freshness = {name: age <= self.settings.telemetry_stale_after for name, age in ages.items()}
         fresh = freshness.get("position", False)
         connected = record.telemetry.connected if record.telemetry else False
-        process_alive = bool(record.px4_process and record.px4_process.returncode is None and record.mavsdk_process and record.mavsdk_process.returncode is None)
+        px4_alive = bool(record.px4_process and record.px4_process.returncode is None)
+        mavsdk_alive = bool(record.mavsdk_process and record.mavsdk_process.returncode is None)
+        process_alive = px4_alive and mavsdk_alive
         return {
             "id": record.id, "status": record.status,
             "process": {"px4_pid": record.px4_process.pid if record.px4_process else None,
                         "mavsdk_pid": record.mavsdk_process.pid if record.mavsdk_process else None,
-                        "instance_id": record.slot, "alive": process_alive},
+                        "instance_id": record.slot, "alive": process_alive,
+                        "px4_alive": px4_alive, "mavsdk_alive": mavsdk_alive},
             "binding": {"world": record.world, "drone_id": record.drone_id,
                         "gazebo_model": record.gazebo_model, "entity_id": record.entity_id,
                         "valid": record.binding_valid, "error": record.binding_error},

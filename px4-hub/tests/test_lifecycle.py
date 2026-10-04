@@ -221,6 +221,55 @@ def test_process_failure_stops_pair_and_preserves_neighbour(tmp_path):
     asyncio.run(run())
 
 
+def test_mavsdk_failure_during_armed_flight_preserves_px4_for_failsafe(tmp_path):
+    class ActiveFlight:
+        class Session:
+            armed = True
+        session = Session()
+
+        def __init__(self):
+            self.lost = False
+
+        async def transport_lost(self):
+            self.lost = True
+
+        async def close(self):
+            pass
+
+        def state(self):
+            return {"active": None, "ready": False}
+
+    async def run():
+        hub = service(tmp_path)
+        result = await hub.create('d0', 'x500_gimbal')
+        record = hub.instances[result['id']]
+        flight = ActiveFlight()
+        record.flight = flight
+        px4_process = record.px4_process
+        record.mavsdk_process.exit()
+        await asyncio.wait_for(record.monitor, 1)
+        assert record.status == 'failed'
+        assert record.last_error == 'MAVSDK process exited unexpectedly'
+        assert record.px4_process is px4_process and px4_process.returncode is None
+        assert flight.lost
+        assert not hub.px4.stopped
+        process = hub.serialize(record)["process"]
+        assert process["px4_alive"] is True and process["mavsdk_alive"] is False
+        assert process["alive"] is False
+        with pytest.raises(HubError) as exc:
+            await hub.restart(record.id)
+        assert exc.value.code == 'px4_autonomous_failsafe_active'
+        with pytest.raises(HubError) as exc:
+            await hub.start_instance(record.id)
+        assert exc.value.code == 'px4_autonomous_failsafe_active'
+        assert record.px4_process is px4_process and px4_process.returncode is None
+        await hub.delete(record.id)
+        assert px4_process.returncode is not None
+        await hub.shutdown()
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize('timeout', [False, True])
 def test_interrupted_start_releases_slot_and_directory(tmp_path, timeout):
     async def run():

@@ -467,6 +467,49 @@ class FlightEnvironment:
         raise AssertionError(f"Host runner did not restart Backend for {scenario} within {timeout}s")
 
     @staticmethod
+    def request_mavsdk_kill(mavsdk_pid, px4_pid, scenario, timeout=30):
+        """Ask the host runner to kill only mavsdk_server and confirm PX4 survives."""
+        if not all(isinstance(pid, int) and pid > 1 for pid in (mavsdk_pid, px4_pid)):
+            raise AssertionError("Invalid Hub process IDs for MAVSDK failure injection")
+        control = ARTIFACTS / "control"
+        control.mkdir(parents=True, exist_ok=True)
+        request = control / f"mavsdk-kill-{scenario}.request"
+        done = control / f"mavsdk-kill-{scenario}.done"
+        request.write_text(f"{mavsdk_pid}:{px4_pid}")
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if done.exists():
+                result = done.read_text().strip()
+                request.unlink(missing_ok=True)
+                done.unlink(missing_ok=True)
+                if result != "px4_alive":
+                    raise AssertionError(f"MAVSDK host failure injection failed: {result}")
+                return
+            time.sleep(.1)
+        raise AssertionError(f"Host runner did not terminate MAVSDK for {scenario} within {timeout}s")
+
+    @staticmethod
+    def request_px4_probe(px4_pid, scenario, timeout=30):
+        if not isinstance(px4_pid, int) or px4_pid <= 1:
+            raise AssertionError("Invalid PX4 process ID for liveness probe")
+        control = ARTIFACTS / "control"
+        control.mkdir(parents=True, exist_ok=True)
+        request = control / f"px4-probe-{scenario}.request"
+        done = control / f"px4-probe-{scenario}.done"
+        request.write_text(str(px4_pid))
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if done.exists():
+                result = done.read_text().strip()
+                request.unlink(missing_ok=True)
+                done.unlink(missing_ok=True)
+                if result != "px4_alive":
+                    raise AssertionError(f"PX4 process is not alive: {result}")
+                return
+            time.sleep(.1)
+        raise AssertionError(f"Host runner did not probe PX4 PID {px4_pid} within {timeout}s")
+
+    @staticmethod
     def archive_live_px4_instances(label, known_instances):
         """Retain diagnostics while a startup attempt may remove its failed instance."""
         root = Path(os.getenv("PX4_INSTANCE_ARTIFACTS", "/px4-instances"))

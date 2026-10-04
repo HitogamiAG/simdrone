@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import math
+import os
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import httpx
 import pytest
@@ -118,6 +120,40 @@ def hub_execution(instance_id, execution_id):
     return response.json()
 
 
+def pause_world(flight, paused):
+    path = "/api/v1/world/pause" if paused else "/api/v1/world/resume"
+    response = flight.request("POST", path, expected=(200,))
+    assert response.json()["paused"] is paused
+
+
+def wait_px4_offboard_failsafe_ulog(instance_id, timeout=20):
+    from pyulog import ULog
+
+    root = Path(os.getenv("PX4_INSTANCE_ARTIFACTS", "/px4-instances")) / instance_id
+    required_messages = ("Failsafe activated", "RTL: start return", "RTL: land at destination",
+                         "Landing detected", "Disarmed by landing")
+    deadline = time.monotonic() + timeout
+    latest = []
+    while time.monotonic() < deadline:
+        for path in root.rglob("*.ulg"):
+            try:
+                log = ULog(str(path))
+                latest = [entry.message for entry in log.logged_messages]
+                topics = {entry.name: entry.data for entry in log.data_list}
+                landed = topics.get("vehicle_land_detected", {}).get("landed", [])
+                arming = topics.get("vehicle_status", {}).get("arming_state", [])
+                if (all(any(required in message for message in latest) for required in required_messages)
+                        and len(landed) and landed[-1] == 1 and len(arming) and arming[-1] == 1):
+                    return {"ulog": str(path), "messages": latest[-len(required_messages):],
+                            "landed": int(landed[-1]), "arming_state": int(arming[-1])}
+            except Exception:
+                # PX4 can still be appending the current ULog; retry until the
+                # diagnostic stream is readable or the bounded deadline expires.
+                continue
+        time.sleep(.5)
+    raise AssertionError(f"PX4 ULog did not confirm Offboard-loss RTL/landing/disarm: {latest[-20:]}")
+
+
 def wait_hub_landed_at_station(flight, instance_id, observer, model, station, timeout=RETURN_TIMEOUT):
     deadline = time.monotonic() + timeout
     stable_since = None
@@ -185,6 +221,117 @@ def test_real_offboard_vertical_motion_zero_hold_and_rtl(flight):
     station = flight.native_geodetic(created["simulation"]["pose"]["position"])
     state = flight.wait_landed(drone_id, station, RETURN_TIMEOUT)
     assert state["armed"] is False
+
+
+def test_real_offboard_pause_resume_returns_and_lands(flight):
+    created = flight.create_drone()
+    drone_id = created["id"]
+    observer = flight.observers[-1]
+    station = created["simulation"]["pose"]["position"]
+    initial, _ = event_data(observer, "telemetry")
+    session = flight.request("POST", f"/api/v1/drones/{drone_id}/flight/offboard/sessions",
+                             expected=(201,), json={"request_id": str(uuid.uuid4())}).json()
+    ws = control_socket(drone_id, session)
+    try:
+        flight.request("POST", f"/api/v1/drones/{drone_id}/flight/offboard/sessions/{session['session_id']}/arm",
+                       expected=(202,), json={"request_id": str(uuid.uuid4())})
+        seq = drive(ws, 0, 1.5)
+        seq, airborne = drive_to_altitude(ws, seq, observer, altitude(initial), {"up": .65}, target_delta=3)
+        assert altitude(airborne) >= altitude(initial) + 3
+        drive(ws, seq, 1.0, forward=.35)
+        pause_world(flight, True)
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            status = flight.request("GET", f"/api/v1/drones/{drone_id}/flight/offboard/sessions/{session['session_id']}",
+                                    expected=(200, 404)).status_code
+            if status == 200:
+                state = flight.request("GET", f"/api/v1/drones/{drone_id}/flight/offboard/sessions/{session['session_id']}").json()
+                if state.get("status") == "paused":
+                    break
+            time.sleep(.2)
+        else:
+            raise AssertionError("Offboard session did not enter paused state")
+    finally:
+        ws.close()
+        pause_world(flight, False)
+    flight.wait_landed(drone_id, flight.native_geodetic(station), RETURN_TIMEOUT)
+    landed = flight.request("GET", f"/api/v1/drones/{drone_id}/flight").json()
+    assert landed["armed"] is False
+
+
+def test_real_offboard_unarmed_session_is_revoked_by_pause(flight):
+    created = flight.create_drone()
+    drone_id = created["id"]
+    session = flight.request("POST", f"/api/v1/drones/{drone_id}/flight/offboard/sessions",
+                             expected=(201,), json={"request_id": str(uuid.uuid4())}).json()
+    try:
+        pause_world(flight, True)
+        deadline = time.monotonic() + 8
+        while time.monotonic() < deadline:
+            response = httpx.get(BACKEND + f"/api/v1/drones/{drone_id}/flight/offboard/sessions/{session['session_id']}", timeout=3)
+            if response.status_code == 404:
+                break
+            time.sleep(.2)
+        else:
+            raise AssertionError("Unarmed Offboard reservation survived world pause")
+    finally:
+        pause_world(flight, False)
+    state = flight.request("GET", f"/api/v1/drones/{drone_id}/flight").json()
+    assert state["armed"] is False
+
+
+def test_real_mavsdk_loss_preserves_px4_offboard_failsafe(flight):
+    created = flight.create_drone()
+    drone_id, model = created["id"], created["name"]
+    station_xyz = created["simulation"]["pose"]["position"]
+    initial_pose = flight.gazebo.current(model)
+    instance_id = flight.instance_ids[drone_id]
+    observer = flight.observers[-1]
+    initial, _ = event_data(observer, "telemetry")
+    session = flight.request("POST", f"/api/v1/drones/{drone_id}/flight/offboard/sessions",
+                             expected=(201,), json={"request_id": str(uuid.uuid4())}).json()
+    ws = control_socket(drone_id, session)
+    flight.request("POST", f"/api/v1/drones/{drone_id}/flight/offboard/sessions/{session['session_id']}/arm",
+                   expected=(202,), json={"request_id": str(uuid.uuid4())})
+    seq = drive(ws, 0, 1.5)
+    seq, airborne = drive_to_altitude(ws, seq, observer, altitude(initial), {"up": .65}, target_delta=3)
+    assert altitude(airborne) >= altitude(initial) + 3
+    hub_state = httpx.get(f"{HUB}/api/v1/instances/{instance_id}/", timeout=5)
+    hub_state.raise_for_status()
+    pids = hub_state.json()["process"]
+    assert pids["px4_pid"] and pids["mavsdk_pid"]
+    ws.close()
+    FlightEnvironment.request_mavsdk_kill(pids["mavsdk_pid"], pids["px4_pid"], "offboard-failsafe")
+
+    deadline = time.monotonic() + RETURN_TIMEOUT
+    landed = None
+    while time.monotonic() < deadline:
+        landed = flight.gazebo.current(model)
+        p = landed["position"]
+        horizontal = math.hypot(p["x"] - station_xyz["x"], p["y"] - station_xyz["y"])
+        if horizontal <= 3 and abs(p["z"] - station_xyz["z"]) <= 1.5:
+            # Require a stable physical pose for two seconds, with Gazebo still
+            # advancing; this is independent of the now-dead MAVSDK telemetry.
+            stable_since = time.monotonic()
+            previous = (p["x"], p["y"], p["z"])
+            while time.monotonic() - stable_since < 2:
+                time.sleep(.2)
+                current = flight.gazebo.current(model)
+                q = current["position"]
+                horizontal_now = math.hypot(q["x"] - station_xyz["x"], q["y"] - station_xyz["y"])
+                if (math.dist((q["x"], q["y"], q["z"]), previous) >= .03
+                        or horizontal_now > 3 or abs(q["z"] - station_xyz["z"]) > 1.5):
+                    break
+                previous = (q["x"], q["y"], q["z"])
+            else:
+                break
+        time.sleep(.2)
+    else:
+        raise AssertionError(f"PX4 Offboard-loss failsafe did not return to station: {landed}")
+    assert landed is not None
+    assert flight.gazebo.current(model)["sim_time_s"] > initial_pose["sim_time_s"]
+    wait_px4_offboard_failsafe_ulog(instance_id)
+    FlightEnvironment.request_px4_probe(pids["px4_pid"], "after-failsafe")
 
 
 def test_real_offboard_three_consecutive_flights_without_reset(flight):
@@ -290,6 +437,40 @@ def test_real_mission_four_waypoints_progress_return_and_replay(flight):
     assert next_waypoint == len(waypoints), f"waypoints not observed in order: {next_waypoint}/{len(waypoints)}; {history[-1]}"
     station = flight.native_geodetic(created["simulation"]["pose"]["position"])
     landed = flight.wait_landed(drone_id, station)
+    assert landed["armed"] is False
+
+
+def test_real_mission_pause_resume_preserves_autonomous_execution(flight):
+    created = flight.create_drone()
+    drone_id = created["id"]
+    station = flight.native_geodetic(created["simulation"]["pose"]["position"])
+    mission = flight.mission(f"pause-{uuid.uuid4().hex[:8]}", [
+        {"x": 18, "y": -8, "z": 6},
+        {"x": 18, "y": -3, "z": 7},
+        {"x": 12, "y": -3, "z": 6},
+    ])
+    accepted = flight.request("POST", f"/api/v1/drones/{drone_id}/flight/missions", expected=(202,), json={
+        "mission_id": mission["id"], "revision": mission["revision"],
+        "request_id": str(uuid.uuid4())}).json()
+    deadline = time.monotonic() + MISSION_TIMEOUT
+    while time.monotonic() < deadline:
+        execution = flight.request("GET", f"/api/v1/drones/{drone_id}/flight/executions/{accepted['execution_id']}").json()
+        if execution.get("phase") == "mission" and execution.get("status") == "active":
+            break
+        time.sleep(.2)
+    else:
+        raise AssertionError(f"Mission did not enter autonomous route phase: {execution}")
+    try:
+        pause_world(flight, True)
+        time.sleep(2)
+        paused = flight.request("GET", f"/api/v1/drones/{drone_id}/flight/executions/{accepted['execution_id']}").json()
+        assert paused["status"] == "active" and paused["phase"] == "mission", \
+            f"World pause interrupted autonomous mission: {paused}"
+    finally:
+        pause_world(flight, False)
+    completed, _ = flight.wait_execution(drone_id, accepted["execution_id"], "completed", MISSION_TIMEOUT)
+    assert completed["status"] == "completed"
+    landed = flight.wait_landed(drone_id, station, RETURN_TIMEOUT)
     assert landed["armed"] is False
 
 

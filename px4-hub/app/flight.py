@@ -790,3 +790,28 @@ class FlightController:
                 self.active.status = "interrupted"
                 self.active.return_task.cancel()
                 await asyncio.gather(self.active.return_task, return_exceptions=True)
+
+    async def transport_lost(self):
+        """Stop local flight tasks without sending commands over a dead SDK link."""
+        if self.closed:
+            return
+        self.closed = True
+        self.closed_event.set()
+        async with self.lock:
+            if self.session:
+                session = self.session
+                session.status = "interrupted"
+                self.session = None
+                if session.watchdog and session.watchdog is not asyncio.current_task():
+                    session.watchdog.cancel()
+                    await asyncio.gather(session.watchdog, return_exceptions=True)
+            if self.active and self.active.task and not self.active.task.done():
+                self.active.status = "interrupted"
+                self.active.phase = "interrupted"
+                self.active.task.cancel()
+                await asyncio.gather(self.active.task, return_exceptions=True)
+            if self.active and self.active.return_task and not self.active.return_task.done():
+                self.active.status = "interrupted"
+                self.active.phase = "interrupted"
+                self.active.return_task.cancel()
+                await asyncio.gather(self.active.return_task, return_exceptions=True)
