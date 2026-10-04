@@ -127,7 +127,7 @@ class MissionUpdate(MissionCreate):
 class MissionRun(BaseModel):
     model_config = ConfigDict(extra="forbid")
     mission_id: str
-    revision: int | None = Field(default=None, ge=1)
+    revision: int = Field(ge=1)
     request_id: str = Field(min_length=1, max_length=128)
 
 

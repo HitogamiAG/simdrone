@@ -5,20 +5,26 @@ import asyncio
 import time
 from types import SimpleNamespace
 
-from app.flight import FlightController, _geo
+from app.flight import Execution, FlightController, _geo
 from app.api import create_app
+from app.adapters import Px4Adapter
 
 
 def test_local_coordinates_are_rotated_by_world_heading():
     origin = {"latitude_deg": 0.0, "longitude_deg": 0.0, "heading_deg": 90.0}
-    lat, lon = _geo(origin, 10.0, 0.0)
-    assert math.isclose(lat, -10.0 / 6378137 * 180 / math.pi, abs_tol=1e-9)
-    assert math.isclose(lon, 0.0, abs_tol=1e-9)
+    lat, lon, altitude = _geo(origin, 10.0, 0.0)
+    # Matches Gazebo SphericalCoordinates::PositionTransform (LOCAL2 -> SPHERICAL).
+    assert math.isclose(lat, 9.0436947704967e-05, abs_tol=1e-12)
+    assert math.isclose(lon, 0.0, abs_tol=1e-12)
+    assert math.isclose(altitude, 0.0, abs_tol=1e-4)
 
 
 def test_local_origin_maps_to_world_origin():
     origin = {"latitude_deg": 47.0, "longitude_deg": 8.0, "heading_deg": 37.0}
-    assert _geo(origin, 0.0, 0.0) == (47.0, 8.0)
+    lat, lon, altitude = _geo(origin, 0.0, 0.0)
+    assert math.isclose(lat, 47.0, abs_tol=1e-12)
+    assert math.isclose(lon, 8.0, abs_tol=1e-12)
+    assert math.isclose(altitude, 0.0, abs_tol=1e-4)
 
 
 def test_offboard_velocity_is_limited_by_active_px4_and_resultant_speed(monkeypatch):
@@ -67,7 +73,8 @@ def test_watchdog_holds_then_returns_after_control_input_is_lost(monkeypatch):
         record = SimpleNamespace(id="instance", status="running", binding_valid=True, saved_parameters={}, station_pose=None,
             telemetry=SimpleNamespace(connected=True, latest={"health": {"is_armable": True},
                 "armed": False, "landed_state": "ON_GROUND", "position": {}},
-                received_by_type={"position": asyncio.get_running_loop().time()}),
+                received_by_type={name: asyncio.get_running_loop().time()
+                                  for name in ("position", "health", "armed", "landed_state")}),
             system=SimpleNamespace(offboard=offboard, action=action))
         service = SimpleNamespace(simulation_paused=False,
             settings=SimpleNamespace(telemetry_stale_after=5.0),
@@ -98,7 +105,8 @@ def test_return_remains_available_after_binding_and_armability_are_lost():
             binding_error="model disappeared", saved_parameters={}, station_pose=None,
             telemetry=SimpleNamespace(connected=True, latest={"health": {"is_armable": False},
                 "armed": True, "landed_state": "IN_AIR", "position": {}},
-                received_by_type={"position": asyncio.get_running_loop().time()}),
+        received_by_type={name: asyncio.get_running_loop().time() - 100
+                          for name in ("position", "health", "armed", "landed_state")}),
             system=SimpleNamespace(action=action))
         service = SimpleNamespace(simulation_paused=False,
             settings=SimpleNamespace(telemetry_stale_after=5.0),
@@ -107,5 +115,74 @@ def test_return_remains_available_after_binding_and_armability_are_lost():
         result = await controller.action("return", "request-1")
         assert result["status"] == "returning"
         assert action.rtl == 1
+
+    asyncio.run(scenario())
+
+
+def test_mission_cannot_start_while_offboard_session_is_reserved():
+    async def scenario():
+        from app.errors import HubError
+
+        controller = FlightController(SimpleNamespace(), SimpleNamespace())
+        controller.session = object()
+        controller.validate_mission = lambda _mission: None
+        try:
+            await controller.start_mission({"id": "m", "revision": 1}, "r")
+        except HubError as error:
+            assert error.code == "flight_mode_conflict"
+        else:
+            raise AssertionError("Mission accepted while Offboard was reserved")
+
+    asyncio.run(scenario())
+
+
+def test_stale_flight_generation_is_rejected():
+    async def scenario():
+        from app.errors import HubError
+
+        controller = FlightController(SimpleNamespace(), SimpleNamespace())
+        try:
+            await controller.start_mission({}, "r", "old-generation")
+        except HubError as error:
+            assert error.code == "flight_generation_conflict"
+        else:
+            raise AssertionError("Command from an old flight generation was accepted")
+
+    asyncio.run(scenario())
+
+
+def test_offboard_loss_failsafe_parameters_are_written_and_read_back():
+    class Parameters:
+        values = {}
+        async def set_param_float(self, name, value): self.values[name] = value
+        async def set_param_int(self, name, value): self.values[name] = value
+        async def get_param_float(self, name): return self.values[name]
+        async def get_param_int(self, name): return self.values[name]
+
+    async def scenario():
+        param = Parameters()
+        await Px4Adapter(SimpleNamespace()).configure_offboard_failsafe(SimpleNamespace(
+            system=SimpleNamespace(param=param)))
+        assert param.values == {"COM_OF_LOSS_T": 1.0, "COM_OBL_RC_ACT": 3}
+
+    asyncio.run(scenario())
+
+
+def test_offboard_session_create_replay_returns_original_token():
+    async def scenario():
+        now = asyncio.get_running_loop().time()
+        record = SimpleNamespace(id="i", status="running", binding_valid=True, binding_error=None,
+            saved_parameters={}, station_pose=None, coordinate_context=None,
+            telemetry=SimpleNamespace(connected=True, latest={"health": {"is_armable": True},
+                "armed": False, "landed_state": "ON_GROUND", "position": {}},
+                received_by_type={name: now for name in ("position", "health", "armed", "landed_state")}),
+            system=SimpleNamespace())
+        service = SimpleNamespace(simulation_paused=False,
+            settings=SimpleNamespace(telemetry_stale_after=5), _get_running=lambda _: record)
+        controller = FlightController(service, record)
+        first = await controller.create_session("same-request")
+        retry = await controller.create_session("same-request")
+        assert retry == first
+        await controller.close()
 
     asyncio.run(scenario())

@@ -61,8 +61,10 @@ async def fixture(*, fail_start=False, fail_setpoint=False):
 
     record = SimpleNamespace(id="instance", status="running", binding_valid=True, binding_error=None,
         world="empty", saved_parameters={}, station_pose={"position": {"x": 0.0, "y": 0.0, "z": 0.0}},
+        coordinate_context=geo,
         telemetry=SimpleNamespace(connected=True, latest=latest,
-            received_by_type={"position": asyncio.get_running_loop().time()}),
+            received_by_type={name: asyncio.get_running_loop().time()
+                              for name in ("position", "health", "armed", "landed_state")}),
         system=SimpleNamespace(action=Action(), offboard=Offboard()))
     service = SimpleNamespace(simulation_paused=False, gazebo=Gazebo(),
         settings=SimpleNamespace(telemetry_stale_after=5), _get_running=lambda _: record)
@@ -169,8 +171,10 @@ async def close_invalidates_inflight_validation():
         c.service.gazebo.world = delayed_world
         request = asyncio.create_task(c.start_mission(mission, "request"))
         await entered.wait()
-        await c.close()
+        closing = asyncio.create_task(c.close())
+        await asyncio.sleep(0)
         resume.set()
+        await closing
         await require_conflict(request)
 
 
@@ -178,6 +182,7 @@ def rejected_websocket_preserves_owner():
     class StubFlight:
         def __init__(self):
             self.session = SimpleNamespace(token="token", owner_connected=False)
+            self.closed_event = asyncio.Event()
 
         def _session(self, _):
             return self.session

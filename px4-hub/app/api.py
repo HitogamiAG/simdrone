@@ -22,7 +22,7 @@ async def flight_validate(instance_id: str, body: dict, request: Request):
 @router.post("/api/v1/instances/{instance_id}/flight/missions", status_code=202)
 async def flight_start_mission(instance_id: str, body: dict, request: Request):
     result = await request.app.state.service.flight_start_mission(instance_id, body["mission"],
-        body["request_id"])
+        body["request_id"], body.get("expected_generation"))
     return {**result, "execution_id": result.get("execution_id")}
 
 
@@ -33,7 +33,8 @@ async def flight_execution(instance_id: str, execution_id: str, request: Request
 
 @router.post("/api/v1/instances/{instance_id}/flight/executions/{execution_id}/cancel", status_code=202)
 async def flight_cancel(instance_id: str, execution_id: str, body: dict, request: Request):
-    return await request.app.state.service.flight_cancel(instance_id, execution_id, body.get("request_id"))
+    return await request.app.state.service.flight_cancel(instance_id, execution_id,
+        body.get("request_id"), body.get("expected_generation"))
 
 
 @router.post("/api/v1/instances/{instance_id}/flight/{action}", status_code=202)
@@ -42,12 +43,13 @@ async def flight_action(instance_id: str, action: str, body: dict, request: Requ
     request_id = body.get("request_id")
     if not isinstance(request_id, str) or not request_id:
         raise HubError(422, "invalid_request_id", "request_id is required")
-    return await request.app.state.service.flight_action(instance_id, action, request_id)
+    return await request.app.state.service.flight_action(instance_id, action, request_id, body.get("expected_generation"))
 
 
 @router.post("/api/v1/instances/{instance_id}/flight/offboard/sessions", status_code=201)
 async def flight_create_session(instance_id: str, request: Request):
-    return await request.app.state.service.flight_create_session(instance_id)
+    body = await request.json()
+    return await request.app.state.service.flight_create_session(instance_id, body.get("request_id"), body.get("expected_generation"))
 
 
 @router.get("/api/v1/instances/{instance_id}/flight/offboard/sessions/{session_id}")
@@ -58,12 +60,15 @@ async def flight_session(instance_id: str, session_id: str, request: Request):
 @router.post("/api/v1/instances/{instance_id}/flight/offboard/sessions/{session_id}/{action}", status_code=202)
 async def flight_session_action(instance_id: str, session_id: str, action: str, request: Request):
     if action not in {"arm", "disarm"}: raise HubError(404, "route_not_found", "Unknown session action")
-    return await request.app.state.service.flight_session_action(instance_id, session_id, action)
+    body = await request.json()
+    return await request.app.state.service.flight_session_action(instance_id, session_id, action,
+        body.get("request_id"), body.get("expected_generation"))
 
 
 @router.delete("/api/v1/instances/{instance_id}/flight/offboard/sessions/{session_id}", status_code=202)
 async def flight_delete_session(instance_id: str, session_id: str, request: Request):
-    return await request.app.state.service.flight_delete_session(instance_id, session_id)
+    body = await request.json()
+    return await request.app.state.service.flight_delete_session(instance_id, session_id, body.get("expected_generation"))
 
 
 @router.websocket("/api/v1/instances/{instance_id}/flight/offboard/sessions/{session_id}/control")
@@ -76,8 +81,22 @@ async def flight_control(instance_id: str, session_id: str, websocket: WebSocket
         await websocket.close(code=1008, reason="offboard session unavailable")
         return
     await websocket.accept()
+    claimed = False
     try:
-        first = await asyncio.wait_for(websocket.receive_json(), 5)
+        handshake = asyncio.create_task(websocket.receive_json())
+        stopped = asyncio.create_task(flight.closed_event.wait())
+        done, pending = await asyncio.wait((handshake, stopped), timeout=5,
+            return_when=asyncio.FIRST_COMPLETED)
+        for task in pending:
+            task.cancel()
+        await asyncio.gather(*pending, return_exceptions=True)
+        if stopped in done:
+            await websocket.close(code=1012, reason="flight generation stopped")
+            return
+        if handshake not in done:
+            await websocket.close(code=1008, reason="control handshake timed out")
+            return
+        first = handshake.result()
         token = first.get("token")
         if not isinstance(token, str) or not __import__("secrets").compare_digest(token, session.token):
             await websocket.close(code=1008, reason="invalid session token")
@@ -86,8 +105,18 @@ async def flight_control(instance_id: str, session_id: str, websocket: WebSocket
             await websocket.close(code=1008, reason="session already has a controller")
             return
         session.owner_connected = True
+        claimed = True
         while True:
-            message = await websocket.receive_json()
+            receive = asyncio.create_task(websocket.receive_json())
+            stopping = asyncio.create_task(flight.closed_event.wait())
+            done, pending = await asyncio.wait((receive, stopping), return_when=asyncio.FIRST_COMPLETED)
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            if stopping in done:
+                await websocket.close(code=1012, reason="flight generation stopped")
+                return
+            message = receive.result()
             result = await flight.input(session_id, token, message)
             await websocket.send_json(result)
     except WebSocketDisconnect:
@@ -98,7 +127,7 @@ async def flight_control(instance_id: str, session_id: str, websocket: WebSocket
     except (asyncio.TimeoutError, ValueError):
         await websocket.close(code=1008, reason="invalid control handshake")
     finally:
-        if 'session' in locals(): session.owner_connected = False
+        if claimed and 'session' in locals(): session.owner_connected = False
 
 
 @router.websocket("/api/v1/instances/{instance_id}/flight/events")
@@ -109,10 +138,15 @@ async def flight_events(instance_id: str, websocket: WebSocket):
     except HubError:
         await websocket.close(code=1008, reason="instance is not available")
         return
+    flight = service._flight(instance_id)
+    generation = flight.generation
     await websocket.accept()
     try:
         while True:
-            await websocket.send_json({"type": "flight", **service._flight(instance_id).state()})
+            if service._flight(instance_id).generation != generation:
+                await websocket.close(code=1012, reason="flight generation changed")
+                return
+            await websocket.send_json({"type": "flight", **flight.state()})
             await asyncio.sleep(.25)
     except (WebSocketDisconnect, asyncio.CancelledError):
         pass

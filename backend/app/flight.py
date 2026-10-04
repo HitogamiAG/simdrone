@@ -12,6 +12,19 @@ class FlightPlatform:
         self.store = MissionStore(platform.settings.mission_db)
         self.executions = {}
         self.request_ids = {}
+        self.control_requests = {}
+
+    def control_replay(self, drone_id, request_id, fingerprint):
+        entry = self.control_requests.get((drone_id, request_id))
+        if entry is None and (drone_id, request_id) in self.request_ids:
+            raise BackendError(409, "request_id_conflict", "request_id was used for another operation")
+        if entry is None: return None
+        if entry["fingerprint"] != fingerprint:
+            raise BackendError(409, "request_id_conflict", "request_id was used for another operation")
+        return entry["response"]
+
+    def remember_control(self, drone_id, request_id, fingerprint, response):
+        self.control_requests[(drone_id, request_id)] = {"fingerprint": fingerprint, "response": response}
 
     def close(self):
         # The Hub owns active flight work; Backend shutdown only drops its process-local index.
@@ -60,25 +73,28 @@ class FlightPlatform:
     async def start_mission(self, drone_id, body):
         # Serialize only acceptance with lifecycle operations; the Hub owns flight execution.
         async with self.platform.lock:
-            drone = self.platform._record(drone_id)
-            await self.platform._running()
-            mission = await asyncio.to_thread(self.store.get, body["mission_id"])
-            if mission is None:
-                raise BackendError(404, "mission_not_found", "Mission was not found")
-            if body.get("revision", mission["revision"]) != mission["revision"]:
-                raise BackendError(409, "mission_revision_conflict", "Requested mission revision is stale")
             request_id = body["request_id"]
             key = (drone_id, request_id)
-            fingerprint = (mission["id"], mission["revision"])
+            fingerprint = (body["mission_id"], body["revision"])
+            if key in self.control_requests:
+                raise BackendError(409, "request_id_conflict", "request_id was used for another operation")
             previous = self.request_ids.get(key)
             if previous:
                 if previous["fingerprint"] != fingerprint:
                     raise BackendError(409, "request_id_conflict", "request_id was used for another operation")
                 return previous["response"]
+            await self.platform._running()
+            drone = self.platform._record(drone_id)
+            mission = await asyncio.to_thread(self.store.get, body["mission_id"])
+            if mission is None:
+                raise BackendError(404, "mission_not_found", "Mission was not found")
+            if body.get("revision", mission["revision"]) != mission["revision"]:
+                raise BackendError(409, "mission_revision_conflict", "Requested mission revision is stale")
             if not drone.instance_id:
                 raise BackendError(409, "autopilot_not_running", "Drone has no PX4 instance")
+            hub_state = await self.platform.hub.flight_state(drone.instance_id)
             accepted = await self.platform.hub.flight_start_mission(
-                drone.instance_id, mission, request_id, drone.generation)
+                drone.instance_id, mission, request_id, hub_state["generation"])
             execution_id = accepted["execution_id"]
             response = {"execution_id": execution_id, "status": "preparing", "mission_id": mission["id"],
                         "revision": mission["revision"], "drone_id": drone_id}
@@ -99,5 +115,11 @@ class FlightPlatform:
         return {"drone_id": drone_id, **state}
 
     async def cancel(self, drone_id, execution_id, request_id):
+        fingerprint = ("mission_cancel", execution_id)
+        replay = self.control_replay(drone_id, request_id, fingerprint)
+        if replay is not None: return replay
         drone = self.platform._record(drone_id)
-        return await self.platform.hub.flight_cancel(drone.instance_id, execution_id, request_id)
+        state = await self.platform.hub.flight_state(drone.instance_id)
+        result = await self.platform.hub.flight_cancel(drone.instance_id, execution_id, request_id, state["generation"])
+        self.remember_control(drone_id, request_id, fingerprint, result)
+        return result

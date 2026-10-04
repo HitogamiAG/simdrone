@@ -33,3 +33,4 @@ def test_flight_and_mission_routes_are_in_openapi():
     assert "/api/v1/missions/{mission_id}/validate" in paths
     assert "/api/v1/drones/{drone_id}/flight/missions" in paths
     assert "/api/v1/drones/{drone_id}/flight/offboard/sessions/{session_id}/{action}" in paths
+    assert paths["/api/v1/drones/{drone_id}/flight/offboard/sessions"]["post"]["requestBody"]["required"] is True

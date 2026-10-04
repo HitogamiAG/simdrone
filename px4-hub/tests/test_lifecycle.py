@@ -32,9 +32,15 @@ class Gazebo:
         await asyncio.sleep(0)
         return 'empty', self.paused
 
+    async def world(self):
+        return {'name': 'empty', 'spherical_coordinates': {
+            'latitude_deg': 0.0, 'longitude_deg': 0.0, 'heading_deg': 0.0,
+            'elevation': 0.0, 'surface_model': 'EARTH_WGS84'}}
+
     async def drone(self, drone_id):
         await asyncio.sleep(0)
-        return {'name': drone_id, 'model': 'x500_gimbal', 'entity_id': hash(drone_id)}
+        return {'name': drone_id, 'model': 'x500_gimbal', 'entity_id': hash(drone_id),
+                'pose': {'position': {'x': 0.0, 'y': 0.0, 'z': 0.0}}}
 
     async def close(self):
         pass

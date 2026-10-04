@@ -16,6 +16,9 @@ async def main():
     failed = 0
     with tempfile.TemporaryDirectory() as directory:
         class Hub:
+            async def flight_state(self, _):
+                return {"generation": "hub-epoch"}
+
             async def flight_start_mission(self, *_):
                 return {"execution_id": "execution"}
 
@@ -29,10 +32,12 @@ async def main():
         mission = {"id": "m", "revision": 1, "world": "empty", "name": "route"}
         flight.store.create(mission)
 
-        async def schema_default_revision_can_start():
-            body = MissionRun(mission_id="m", request_id="optional").model_dump()
-            result = await flight.start_mission("d", body)
-            assert result["execution_id"] == "execution"
+        async def schema_requires_revision():
+            try:
+                MissionRun(mission_id="m", request_id="missing-revision")
+            except Exception:
+                return
+            raise AssertionError("MissionRun accepted a missing revision")
 
         async def idempotent_replay_survives_definition_edit():
             body = MissionRun(mission_id="m", revision=1, request_id="repeat").model_dump()
@@ -53,11 +58,11 @@ async def main():
             adapter.client = httpx.AsyncClient(base_url="http://hub", transport=httpx.MockTransport(handler))
             try:
                 await adapter.flight_start_mission("i", mission, "generation", 7)
-                assert captured[0].get("generation") == 7, f"Generation not forwarded: {captured[0]}"
+                assert captured[0].get("expected_generation") == 7, f"Generation not forwarded: {captured[0]}"
             finally:
                 await adapter.close()
 
-        for check in (schema_default_revision_can_start, idempotent_replay_survives_definition_edit,
+        for check in (schema_requires_revision, idempotent_replay_survives_definition_edit,
                       generation_is_forwarded_to_hub):
             try:
                 await check()

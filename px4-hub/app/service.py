@@ -34,6 +34,7 @@ class Instance:
     udp_port: int = field(init=False)
     grpc_port: int = field(init=False)
     station_pose: dict | None = None
+    coordinate_context: dict | None = None
     flight: object | None = None
 
     def __post_init__(self):
@@ -128,6 +129,7 @@ class InstanceService:
             workdir = self.settings.instance_dir / instance_id
             record = Instance(instance_id, drone_id, drone["name"], drone.get("entity_id"), slot, self.world_name, workdir)
             record.station_pose = drone.get("pose")
+            record.coordinate_context = (await self.gazebo.world()).get("spherical_coordinates")
             self.instances[instance_id] = record
         async with record.operation_lock:
             try:
@@ -333,31 +335,30 @@ class InstanceService:
     async def flight_validate(self, instance_id, mission):
         return await self._flight(instance_id).validate_mission(mission)
 
-    async def flight_start_mission(self, instance_id, mission, request_id):
-        return await self._flight(instance_id).start_mission(mission, request_id)
+    async def flight_start_mission(self, instance_id, mission, request_id, expected_generation=None):
+        return await self._flight(instance_id).start_mission(mission, request_id, expected_generation)
 
     async def flight_execution(self, instance_id, execution_id):
         return self._flight(instance_id).execution(execution_id)
 
-    async def flight_cancel(self, instance_id, execution_id, request_id):
-        del request_id
-        return await self._flight(instance_id).cancel(execution_id)
+    async def flight_cancel(self, instance_id, execution_id, request_id, expected_generation=None):
+        return await self._flight(instance_id).cancel(execution_id, request_id, expected_generation)
 
-    async def flight_action(self, instance_id, action, request_id):
-        return await self._flight(instance_id).action(action, request_id)
+    async def flight_action(self, instance_id, action, request_id, expected_generation=None):
+        return await self._flight(instance_id).action(action, request_id, expected_generation)
 
-    async def flight_create_session(self, instance_id):
-        return await self._flight(instance_id).create_session()
+    async def flight_create_session(self, instance_id, request_id=None, expected_generation=None):
+        return await self._flight(instance_id).create_session(request_id, expected_generation)
 
     async def flight_session(self, instance_id, session_id):
         flight = self._flight(instance_id)
         return flight.session_public(flight._session(session_id))
 
-    async def flight_session_action(self, instance_id, session_id, action):
-        return await self._flight(instance_id).session_action(session_id, action)
+    async def flight_session_action(self, instance_id, session_id, action, request_id=None, expected_generation=None):
+        return await self._flight(instance_id).session_action(session_id, action, request_id, expected_generation)
 
-    async def flight_delete_session(self, instance_id, session_id):
-        return await self._flight(instance_id).delete_session(session_id)
+    async def flight_delete_session(self, instance_id, session_id, expected_generation=None):
+        return await self._flight(instance_id).delete_session(session_id, expected_generation)
 
     async def _watch(self, record):
         waits = [asyncio.create_task(record.px4_process.wait()), asyncio.create_task(record.mavsdk_process.wait())]
@@ -368,6 +369,8 @@ class InstanceService:
                     return
                 process = "PX4" if waits[0] in done else "MAVSDK"
                 record.status, record.last_error = "failed", f"{process} process exited unexpectedly"
+                if record.flight:
+                    await record.flight.close()
                 await self.px4.stop(record)
         finally:
             for task in waits:

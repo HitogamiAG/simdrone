@@ -66,17 +66,32 @@ async def flight_cancel(drone_id: str, execution_id: str, body: FlightRequest, r
 async def flight_action(drone_id: str, action: str, body: FlightRequest, request: Request):
     if action not in {"return", "land"}: raise BackendError(404, "route_not_found", "Unknown flight action")
     async with request.app.state.platform.lock:
+        flight = request.app.state.flight
+        fingerprint = ("flight_action", action)
+        replay = flight.control_replay(drone_id, body.request_id, fingerprint)
+        if replay is not None: return replay
         drone = request.app.state.platform._record(drone_id)
         if not drone.instance_id: raise BackendError(409, "autopilot_not_running", "Drone has no PX4 instance")
-        return await request.app.state.platform.hub.flight_action(drone.instance_id, action, body.model_dump())
+        state = await request.app.state.platform.hub.flight_state(drone.instance_id)
+        command = body.model_dump() | {"expected_generation": state["generation"]}
+        result = await request.app.state.platform.hub.flight_action(drone.instance_id, action, command)
+        flight.remember_control(drone_id, body.request_id, fingerprint, result)
+        return result
 
 
 @router.post("/api/v1/drones/{drone_id}/flight/offboard/sessions", status_code=201)
-async def offboard_create(drone_id: str, request: Request):
+async def offboard_create(drone_id: str, body: FlightRequest, request: Request):
     async with request.app.state.platform.lock:
+        flight = request.app.state.flight
+        fingerprint = ("offboard_create",)
+        replay = flight.control_replay(drone_id, body.request_id, fingerprint)
+        if replay is not None: return replay
         drone = request.app.state.platform._record(drone_id)
         if not drone.instance_id: raise BackendError(409, "autopilot_not_running", "Drone has no PX4 instance")
-        return await request.app.state.platform.hub.create_offboard(drone.instance_id)
+        state = await request.app.state.platform.hub.flight_state(drone.instance_id)
+        result = await request.app.state.platform.hub.create_offboard(drone.instance_id, body.request_id, state["generation"])
+        flight.remember_control(drone_id, body.request_id, fingerprint, result)
+        return result
 
 
 @router.get("/api/v1/drones/{drone_id}/flight/offboard/sessions/{session_id}")
@@ -87,12 +102,20 @@ async def offboard_get(drone_id: str, session_id: str, request: Request):
 
 
 @router.post("/api/v1/drones/{drone_id}/flight/offboard/sessions/{session_id}/{action}", status_code=202)
-async def offboard_action(drone_id: str, session_id: str, action: str, request: Request):
+async def offboard_action(drone_id: str, session_id: str, action: str, body: FlightRequest, request: Request):
     if action not in {"arm", "disarm"}: raise BackendError(404, "route_not_found", "Unknown offboard action")
     async with request.app.state.platform.lock:
+        flight = request.app.state.flight
+        fingerprint = ("offboard_action", session_id, action)
+        replay = flight.control_replay(drone_id, body.request_id, fingerprint)
+        if replay is not None: return replay
         drone = request.app.state.platform._record(drone_id)
         if not drone.instance_id: raise BackendError(409, "autopilot_not_running", "Drone has no PX4 instance")
-        return await request.app.state.platform.hub.offboard_action(drone.instance_id, session_id, action)
+        state = await request.app.state.platform.hub.flight_state(drone.instance_id)
+        result = await request.app.state.platform.hub.offboard_action(drone.instance_id, session_id, action,
+            body.request_id, state["generation"])
+        flight.remember_control(drone_id, body.request_id, fingerprint, result)
+        return result
 
 
 @router.delete("/api/v1/drones/{drone_id}/flight/offboard/sessions/{session_id}", status_code=202)
@@ -100,7 +123,8 @@ async def offboard_delete(drone_id: str, session_id: str, request: Request):
     async with request.app.state.platform.lock:
         drone = request.app.state.platform._record(drone_id)
         if not drone.instance_id: raise BackendError(409, "autopilot_not_running", "Drone has no PX4 instance")
-        return await request.app.state.platform.hub.offboard_delete(drone.instance_id, session_id)
+        state = await request.app.state.platform.hub.flight_state(drone.instance_id)
+        return await request.app.state.platform.hub.offboard_delete(drone.instance_id, session_id, state["generation"])
 
 
 @router.websocket("/api/v1/drones/{drone_id}/flight/offboard/sessions/{session_id}/control")

@@ -48,6 +48,17 @@ class Px4Adapter:
             raise TimeoutError("PX4 did not produce position telemetry before startup timeout") from exc
         if record.px4_process.returncode is not None or record.mavsdk_process.returncode is not None:
             raise RuntimeError("PX4 or MAVSDK process exited during startup")
+        await self.configure_offboard_failsafe(record)
+
+    async def configure_offboard_failsafe(self, record):
+        """Make PX4 return home when its Offboard setpoint stream disappears."""
+        param = record.system.param
+        await param.set_param_float("COM_OF_LOSS_T", 1.0)
+        await param.set_param_int("COM_OBL_RC_ACT", 3)  # Return mode in PX4 v1.16.
+        timeout = await param.get_param_float("COM_OF_LOSS_T")
+        action = await param.get_param_int("COM_OBL_RC_ACT")
+        if abs(timeout - 1.0) > 1e-3 or action != 3:
+            raise RuntimeError(f"PX4 Offboard-loss failsafe was not confirmed: timeout={timeout}, action={action}")
 
     async def _read_output(self, process, logs, path):
         decoder = LineDecoder(logs)

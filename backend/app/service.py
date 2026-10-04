@@ -117,6 +117,7 @@ class Platform:
         return value
 
     def _serialize(self, item: Drone, gazebo=None, autopilot=None, *, gazebo_error=None, autopilot_error=None):
+        flight_available = bool(autopilot and autopilot.get("status") == "running")
         return {"id": item.id, "name": item.name, "model": item.model, "status": item.status,
                 "simulation": {"drone_id": item.gazebo_id,
                                "pose": (gazebo or {}).get("pose") if item.gazebo_id else item.pose,
@@ -129,7 +130,8 @@ class Platform:
                 "binding": {"valid": bool(gazebo and item.gazebo_id),
                             "generation": item.generation},
                 "flight": (autopilot or {}).get("flight", {"active": None, "ready": False}),
-                "capabilities": {"flight_control": True, "missions": True, "manual_control": True},
+                "capabilities": {"flight_control": flight_available, "missions": flight_available,
+                                 "manual_control": flight_available},
                 "last_error": item.last_error}
 
     async def list_drones(self):
