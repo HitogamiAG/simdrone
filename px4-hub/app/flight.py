@@ -285,19 +285,8 @@ class FlightController:
             else:
                 raise TimeoutError("PX4 takeoff altitude was not observed")
             execution.phase, execution.status = "mission", "active"
-            await self.record.system.mission_raw.start_mission()
-            # MISSION_START may be acknowledged while PX4 remains in HOLD
-            # (for example when the uploaded plan is unusable). Do not leave
-            # an armed vehicle hovering forever while waiting for progress.
-            mode_deadline = time.monotonic() + 10
-            while time.monotonic() < mode_deadline:
-                if self.active is not execution:
-                    return
-                if str(self.telemetry().get("flight_mode", "")).upper() == "MISSION":
-                    break
-                await asyncio.sleep(.1)
-            else:
-                raise RuntimeError("PX4 accepted mission start but did not enter MISSION mode")
+            if not await self._start_mission_mode(execution):
+                return
             progress_stream = self.record.system.mission_raw.mission_progress().__aiter__()
             while True:
                 if self.active is not execution: return
@@ -357,6 +346,32 @@ class FlightController:
             if original_rtl_altitude is not None and self._ground_confirmed():
                 try: await self.record.system.param.set_param_float("RTL_RETURN_ALT", original_rtl_altitude)
                 except Exception: pass
+
+    async def _start_mission_mode(self, execution):
+        # MAVSDK start_mission only selects MISSION mode; repeating it does
+        # not re-upload / rewind the route or arm again. PX4's completion of
+        # TAKEOFF can race this command and leave the vehicle in HOLD.
+        async with self.lock:
+            if self.closed or self.active is not execution or execution.status != "active":
+                return False
+            await self.record.system.mission_raw.start_mission()
+        deadline = time.monotonic() + 10
+        next_retry = time.monotonic() + 1
+        while time.monotonic() < deadline:
+            async with self.lock:
+                if self.closed or self.active is not execution or execution.status != "active":
+                    return False
+                fresh = self.telemetry_fresh("flight_mode", "armed", "landed_state")
+                mode = str(self.telemetry().get("flight_mode", "")).upper()
+                if fresh and mode == "MISSION":
+                    return True
+                if (fresh and mode == "HOLD" and self.telemetry().get("armed") is True
+                        and not self._on_ground() and not self.service.simulation_paused
+                        and time.monotonic() >= next_retry):
+                    await self.record.system.mission_raw.start_mission()
+                    next_retry = time.monotonic() + 1
+            await asyncio.sleep(.1)
+        raise RuntimeError("PX4 accepted mission start but did not enter MISSION mode")
 
     async def _wait_landed(self, execution):
         deadline = time.monotonic() + 180

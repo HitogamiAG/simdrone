@@ -389,3 +389,62 @@ def test_watchdog_and_return_transition_are_serialized():
         assert session.status == "returning"
         await controller.delete_session(created["session_id"])
     asyncio.run(scenario())
+
+
+def test_mission_start_reconciles_acknowledged_hold_without_rearming_or_reupload():
+    async def scenario(cancel=False):
+        now = asyncio.get_running_loop().time()
+        samples = {"flight_mode": "HOLD", "armed": True, "landed_state": "IN_AIR"}
+        execution = Execution("execution", "request", "mission", status="active")
+
+        class Mission:
+            calls = 0
+            async def start_mission(self):
+                self.calls += 1
+                if cancel:
+                    execution.status = "returning"
+                elif self.calls == 2:
+                    samples["flight_mode"] = "MISSION"
+
+        mission = Mission()
+        record = SimpleNamespace(system=SimpleNamespace(mission_raw=mission),
+            telemetry=SimpleNamespace(latest=samples,
+                received_by_type={name: now for name in samples}))
+        service = SimpleNamespace(simulation_paused=False,
+            settings=SimpleNamespace(telemetry_stale_after=5))
+        controller = FlightController(service, record)
+        controller.active = execution
+        started = await controller._start_mission_mode(execution)
+        assert started is not cancel
+        assert mission.calls == (1 if cancel else 2)
+
+    asyncio.run(scenario())
+    asyncio.run(scenario(cancel=True))
+
+
+def test_mission_mode_retry_requires_fresh_telemetry():
+    async def scenario():
+        class Mission:
+            calls = 0
+            async def start_mission(self): self.calls += 1
+
+        mission = Mission()
+        samples = {"flight_mode": "HOLD", "armed": True, "landed_state": "IN_AIR"}
+        record = SimpleNamespace(system=SimpleNamespace(mission_raw=mission),
+            telemetry=SimpleNamespace(latest=samples,
+                received_by_type={name: asyncio.get_running_loop().time() - 10 for name in samples}))
+        controller = FlightController(SimpleNamespace(simulation_paused=False,
+            settings=SimpleNamespace(telemetry_stale_after=5)), record)
+        execution = Execution("execution", "request", "mission", status="active")
+        controller.active = execution
+        task = asyncio.create_task(controller._start_mission_mode(execution))
+        try:
+            await asyncio.sleep(1.2)
+            assert mission.calls == 1
+            execution.status = "returning"
+            assert await task is False
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(scenario())
