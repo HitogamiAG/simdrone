@@ -23,7 +23,7 @@ class SensorsOperations(ServiceContext):
     def _refresh_sensors(self, drone_id: str | None = None, name: str | None = None):
         if not self.world:
             return
-        names = {r.name: r.id for r in self.drones.values()}
+        names = {r.gazebo_model: r.id for r in self.drones.values()}
         if name and drone_id:
             names[name] = drone_id
         prefix_root = f"/world/{self.settings.world_name}/model/"
@@ -185,7 +185,7 @@ class SensorsOperations(ServiceContext):
     @serialized
     def _sensor(self, drone_id, sensor_name):
         self._record(drone_id)
-        self._refresh_sensors(drone_id, self.drones[drone_id].name)
+        self._refresh_sensors(drone_id, self.drones[drone_id].gazebo_model)
         sensor = self.sensors.get(f"{drone_id}:{sensor_name}")
         if not sensor:
             raise ApiFault(404, "sensor_not_found", f"Sensor {sensor_name} was not found")
@@ -205,7 +205,6 @@ class SensorsOperations(ServiceContext):
         result["latest"] = None
         result["observed_update_rate"] = None
         return result
-
 
 
 

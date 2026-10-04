@@ -17,6 +17,11 @@ class DroneRecord:
     api_created: bool = False
     initial_sdf: str | None = None
     entity_id: int | None = None
+    entity_name: str | None = None
+
+    @property
+    def gazebo_model(self) -> str:
+        return self.entity_name or self.name
 @dataclass
 class SensorRecord:
     id: str

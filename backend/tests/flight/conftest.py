@@ -117,6 +117,59 @@ class TelemetryObserver:
         self.thread.join(timeout=3)
 
 
+class HubTelemetryObserver:
+    """PX4 telemetry stream through Hub, independent of Backend availability."""
+
+    def __init__(self, instance_id: str):
+        self.instance_id = instance_id
+        self.latest_by_type: dict[str, dict] = {}
+        self.condition = threading.Condition()
+        self.stop_event = threading.Event()
+        self.error: str | None = None
+        self.thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self):
+        self.thread.start()
+        return self
+
+    def _run(self):
+        url = HUB.replace("http://", "ws://").replace("https://", "wss://")
+        url += f"/api/v1/instances/{self.instance_id}/telemetry"
+        try:
+            with connect(url, open_timeout=10, close_timeout=2, max_size=1_000_000) as ws:
+                ws.socket.settimeout(.5)
+                while not self.stop_event.is_set():
+                    try:
+                        event = json.loads(ws.recv())
+                    except TimeoutError:
+                        continue
+                    with self.condition:
+                        self.latest_by_type[event["type"]] = {
+                            "monotonic": time.monotonic(), "data": event.get("data")}
+                        self.condition.notify_all()
+        except Exception as exc:
+            if not self.stop_event.is_set():
+                self.error = repr(exc)
+
+    def telemetry(self, required=("position", "velocity", "armed", "landed_state"), timeout=3):
+        deadline = time.monotonic() + timeout
+        with self.condition:
+            while time.monotonic() < deadline:
+                if self.error:
+                    raise AssertionError(f"Hub telemetry observer failed: {self.error}")
+                now = time.monotonic()
+                fresh = {key: value for key, value in self.latest_by_type.items()
+                         if now - value["monotonic"] <= 5}
+                if all(key in fresh for key in required):
+                    return {key: value["data"] for key, value in fresh.items()}
+                self.condition.wait(min(.2, max(.01, deadline - time.monotonic())))
+        raise AssertionError(f"Fresh Hub telemetry unavailable for {required}: {list(fresh)}")
+
+    def close(self):
+        self.stop_event.set()
+        self.thread.join(timeout=3)
+
+
 class Px4LogObserver:
     """Collect PX4 process output before its instance directory is deleted."""
 
@@ -222,11 +275,44 @@ class GazeboPoseObserver:
         self.node.unsubscribe(self.stats_topic)
 
 
+class GazeboNavSatObserver:
+    """Direct raw Gazebo NavSat samples for reset/startup diagnostics."""
+
+    def __init__(self, topic):
+        self.world = World("empty", timeout_ms=3000)
+        self.node = self.world.node
+        self.samples = []
+        self.lock = threading.Lock()
+        self.topic = topic
+        message_type = _load_bindings()["sensor_types"]["gz.msgs.NavSat"]
+        if not self.node.subscribe(message_type, topic, self._on_sample):
+            raise RuntimeError(f"Gazebo NavSat subscription failed: {topic}")
+
+    def _on_sample(self, message):
+        sample = {"monotonic": time.monotonic(), **{
+            name: getattr(message, name) for name in
+            ("latitude_deg", "longitude_deg", "altitude", "velocity_east",
+             "velocity_north", "velocity_up")}}
+        with self.lock:
+            self.samples.append(sample)
+            if len(self.samples) > 2000:
+                del self.samples[:1000]
+
+    def snapshot(self):
+        with self.lock:
+            return list(self.samples)
+
+    def close(self):
+        self.node.unsubscribe(self.topic)
+
+
 class FlightEnvironment:
     def __init__(self):
         self.http = httpx.Client(timeout=15)
         self.gazebo = GazeboPoseObserver()
+        self.navsat_observers: list[GazeboNavSatObserver] = []
         self.observers: list[TelemetryObserver] = []
+        self.hub_observers: list[HubTelemetryObserver] = []
         self.px4_logs: dict[str, Px4LogObserver] = {}
         self.instance_ids: dict[str, str] = {}
         self.archived_instances: set[str] = set()
@@ -353,6 +439,59 @@ class FlightEnvironment:
         body.update(overrides)
         return self.request("POST", "/api/v1/missions/", expected=(201,), json=body).json()
 
+    def hub_telemetry(self, instance_id):
+        observer = HubTelemetryObserver(instance_id).start()
+        self.hub_observers.append(observer)
+        return observer
+
+    def observe_navsat(self, topic):
+        observer = GazeboNavSatObserver(topic)
+        self.navsat_observers.append(observer)
+        return observer
+
+    @staticmethod
+    def request_backend_restart(scenario, timeout=60):
+        """Ask the host runner to stop/start Backend; Docker stays on the host."""
+        control = ARTIFACTS / "control"
+        control.mkdir(parents=True, exist_ok=True)
+        request = control / f"backend-loss-{scenario}.request"
+        done = control / f"backend-loss-{scenario}.done"
+        request.write_text(scenario)
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if done.exists():
+                request.unlink(missing_ok=True)
+                done.unlink(missing_ok=True)
+                return
+            time.sleep(.1)
+        raise AssertionError(f"Host runner did not restart Backend for {scenario} within {timeout}s")
+
+    @staticmethod
+    def archive_live_px4_instances(label, known_instances):
+        """Retain diagnostics while a startup attempt may remove its failed instance."""
+        root = Path(os.getenv("PX4_INSTANCE_ARTIFACTS", "/px4-instances"))
+        if not root.exists():
+            return
+        for instance_root in root.iterdir():
+            if not instance_root.is_dir() or instance_root.name in known_instances:
+                continue
+            destination = ARTIFACTS / "px4" / label / instance_root.name
+            for source in instance_root.rglob("*"):
+                if not source.is_file() or not (source.suffix == ".ulg" or source.name in {"px4.log", "mavsdk.log"}):
+                    continue
+                target = destination / source.relative_to(instance_root)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    if source.name == "px4.log":
+                        FlightEnvironment._filter_px4_log(source, target.with_suffix(".filtered.txt"),
+                                                          max_bytes=8 * 1024 * 1024)
+                    else:
+                        shutil.copy2(source, target)
+                except (FileNotFoundError, PermissionError, OSError):
+                    # PX4 may rotate or remove a file while this diagnostic
+                    # snapshot is being copied; the next pass retries it.
+                    continue
+
     def dump(self, label: str, extra=None):
         ARTIFACTS.mkdir(parents=True, exist_ok=True)
         archived_px4 = {}
@@ -469,7 +608,47 @@ class FlightEnvironment:
                 self.request("DELETE", f"/api/v1/drones/{drone_id}/", expected=(200, 204, 404))
             except Exception:
                 pass
+        # A Backend restart intentionally forgets its public drone registry,
+        # while Hub keeps the autonomous PX4 instance alive. Drain those
+        # orphans only after the test artifact has been written by the fixture.
+        try:
+            instances = httpx.get(HUB + "/api/v1/instances/", timeout=5).json()
+            for instance in instances:
+                instance_id = instance.get("id")
+                if not instance_id:
+                    continue
+                state = httpx.get(f"{HUB}/api/v1/instances/{instance_id}/flight", timeout=5)
+                if state.status_code == 200:
+                    flight = state.json()
+                    landed = flight.get("landed_state")
+                    landed_value = landed.get("landed_state") if isinstance(landed, dict) else landed
+                    if flight.get("armed") is not False or str(landed_value).lower() not in {"on_ground", "2"}:
+                        continue
+                elif state.status_code != 404:
+                    continue
+                httpx.delete(f"{HUB}/api/v1/instances/{instance_id}/", timeout=10)
+        except Exception:
+            pass
+        try:
+            gazebos = httpx.get("http://gazebo-service:8000/api/v1/drones/", timeout=5).json()
+            for drone in gazebos:
+                drone_id = drone.get("id")
+                if drone_id:
+                    httpx.delete(f"http://gazebo-service:8000/api/v1/drones/{drone_id}/", timeout=10)
+        except Exception:
+            pass
+        try:
+            status = httpx.get(BACKEND + "/api/v1/system/status", timeout=5).json()
+            configuration = status.get("backend", {}).get("world_configuration", {})
+            if configuration.get("reason") == "configured_world_contains_drone":
+                self.request_backend_restart(f"cleanup-{time.time_ns()}")
+        except Exception:
+            pass
         for observer in self.observers:
+            observer.close()
+        for observer in self.hub_observers:
+            observer.close()
+        for observer in self.navsat_observers:
             observer.close()
         for observer in self.px4_logs.values():
             observer.close()

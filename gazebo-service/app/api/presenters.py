@@ -4,6 +4,7 @@ import os
 
 def drone_json(record, sensors, sensor_presenter):
     return {"id": record.id, "entity_id": record.entity_id, "name": record.name,
+            "gazebo_model": record.gazebo_model,
             "model": record.model, "pose": record.pose.model_dump(),
             "pose_source": "Gazebo pose/info", "sensors": [sensor_presenter(item) for item in sensors]}
 

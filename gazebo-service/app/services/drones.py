@@ -26,12 +26,12 @@ class DronesOperations(ServiceContext):
         by_name = {m.name: m for m in scene.model}
         result = []
         for rec in self.drones.values():
-            model = by_name.get(rec.name)
+            model = by_name.get(rec.gazebo_model)
             if model is None:
                 continue
             rec.entity_id = model.id
             rec.pose = self._current_pose(model.id)
-            self._refresh_sensors(rec.id, rec.name)
+            self._refresh_sensors(rec.id, rec.gazebo_model)
             result.append(self._drone_json(rec))
         return result
 
@@ -56,17 +56,17 @@ class DronesOperations(ServiceContext):
             if not rec.initial_sdf:
                 raise ApiFault(503, "model_description_unavailable", "Gazebo did not expose the created model SDF")
             self.drones[rec.id] = rec
-            self._refresh_sensors(rec.id, rec.name)
+            self._refresh_sensors(rec.id, rec.gazebo_model)
             return self._drone_json(rec)
 
     def _spawn(self, rec: DroneRecord):
         if rec.initial_sdf:
-            self.world.create_model(rec.name, rec.pose, sdf=rec.initial_sdf)
+            self.world.create_model(rec.gazebo_model, rec.pose, sdf=rec.initial_sdf)
         elif rec.path and rec.path.is_file():
-            self.world.create_model(rec.name, rec.pose, sdf_filename=str(rec.path))
+            self.world.create_model(rec.gazebo_model, rec.pose, sdf_filename=str(rec.path))
         else:
             raise ApiFault(409, "reset_unsupported", "No saved model description is available")
-        model = self._wait_model(rec.name)
+        model = self._wait_model(rec.gazebo_model)
         rec.entity_id = model.id
         rec.pose = self._current_pose(model.id)
 
@@ -81,12 +81,12 @@ class DronesOperations(ServiceContext):
     @serialized
     def get_drone(self, drone_id):
         rec = self._record(drone_id)
-        model = next((m for m in self._scene().model if m.name == rec.name), None)
+        model = next((m for m in self._scene().model if m.name == rec.gazebo_model), None)
         if model is None:
             raise ApiFault(404, "drone_not_found", f"Drone entity {rec.name} no longer exists")
         rec.entity_id = model.id
         rec.pose = self._current_pose(model.id)
-        self._refresh_sensors(rec.id, rec.name)
+        self._refresh_sensors(rec.id, rec.gazebo_model)
         return self._drone_json(rec)
 
     def _retire_drone_sensors(self, drone_id, reason):
@@ -106,7 +106,7 @@ class DronesOperations(ServiceContext):
     def _wait_sensors(self, drone_id, names):
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
-            self._refresh_sensors(drone_id, self.drones[drone_id].name)
+            self._refresh_sensors(drone_id, self.drones[drone_id].gazebo_model)
             if all((sensor := self.sensors.get(f"{drone_id}:{name}")) and sensor.publisher_type for name in names):
                 return
             time.sleep(.1)
@@ -125,16 +125,21 @@ class DronesOperations(ServiceContext):
         active = [s.name for s in self.sensors.values() if s.id.startswith(rec.id + ":") and s.is_camera and s.id in self.camera_procs]
         self._retire_drone_sensors(drone_id, "Drone reset; reconnect to the new sensor")
         old_entity = rec.entity_id
-        self._remove_entity(rec.name)
+        old_model = rec.gazebo_model
+        self._remove_entity(old_model)
         with self.pose_condition:
             self.poses.pop(old_entity, None)
         rec.pose = rec.initial_pose.model_copy(deep=True)
+        # Gazebo sensor publishers may outlive a removed model briefly. A new
+        # entity name prevents PX4 from receiving stale and fresh GPS data on
+        # the same topic while the reset model starts.
+        rec.entity_name = f"{rec.name}_reset_{uuid.uuid4().hex[:8]}"
         try:
             self._spawn(rec)
         except Exception as exc:
             self.drones.pop(drone_id, None)
             raise ApiFault(503, "drone_recreate_failed", "Old model removed but recreation failed", {"id": drone_id, "removed": True, "reason": str(exc)}) from exc
-        self._refresh_sensors(rec.id, rec.name)
+        self._refresh_sensors(rec.id, rec.gazebo_model)
         if active:
             self._wait_sensors(drone_id, active)
             for name in active:
@@ -146,7 +151,7 @@ class DronesOperations(ServiceContext):
         self._ensure_ready()
         rec = self._record(drone_id)
         self._retire_drone_sensors(drone_id, "Drone deleted")
-        self._remove_entity(rec.name)
+        self._remove_entity(rec.gazebo_model)
         with self.pose_condition:
             self.poses.pop(rec.entity_id, None)
         del self.drones[drone_id]

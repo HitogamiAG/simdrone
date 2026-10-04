@@ -33,12 +33,30 @@ run_once() {
     $COMPOSE up -d --build --wait gazebo-service px4-hub backend mediamtx
     $COMPOSE images --format json >"artifacts/flight/images-${RUN_INDEX}.json"
     $COMPOSE build flight-runner
+    mkdir -p artifacts/flight/control
+    rm -f artifacts/flight/control/backend-loss-*.request artifacts/flight/control/backend-loss-*.done
     set +e
     if [ -n "${FLIGHT_TEST_FILTER:-}" ]; then
-        $COMPOSE run --rm --no-deps flight-runner python -m pytest -q test_flight.py -k "$FLIGHT_TEST_FILTER" >"artifacts/flight/run-${RUN_INDEX}.log" 2>&1
+        $COMPOSE run --rm --no-deps flight-runner python -m pytest -q test_flight.py -k "$FLIGHT_TEST_FILTER" >"artifacts/flight/run-${RUN_INDEX}.log" 2>&1 &
     else
-        $COMPOSE run --rm --no-deps flight-runner >"artifacts/flight/run-${RUN_INDEX}.log" 2>&1
+        $COMPOSE run --rm --no-deps flight-runner >"artifacts/flight/run-${RUN_INDEX}.log" 2>&1 &
     fi
+    TEST_PID=$!
+    while kill -0 "$TEST_PID" 2>/dev/null; do
+        for REQUEST in artifacts/flight/control/backend-loss-*.request; do
+            [ -f "$REQUEST" ] || continue
+            DONE=${REQUEST%.request}.done
+            [ ! -f "$DONE" ] || continue
+            printf 'Host runner stopping Backend for 8 seconds (%s)\n' "$(basename "$REQUEST")" >>"artifacts/flight/run-${RUN_INDEX}.log"
+            $COMPOSE stop --timeout 3 backend >>"artifacts/flight/run-${RUN_INDEX}.log" 2>&1
+            sleep 8
+            $COMPOSE start backend >>"artifacts/flight/run-${RUN_INDEX}.log" 2>&1
+            $COMPOSE up -d --wait backend >>"artifacts/flight/run-${RUN_INDEX}.log" 2>&1
+            touch "$DONE"
+        done
+        sleep .2
+    done
+    wait "$TEST_PID"
     RESULT=$?
     set -e
     cat "artifacts/flight/run-${RUN_INDEX}.log"

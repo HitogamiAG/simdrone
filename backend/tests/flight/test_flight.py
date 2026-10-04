@@ -4,12 +4,13 @@ from __future__ import annotations
 import math
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 
 import httpx
 import pytest
 from websockets.sync.client import connect
 
-from conftest import (BACKEND, FlightEnvironment, MANEUVER_TIMEOUT,
+from conftest import (BACKEND, HUB, FlightEnvironment, MANEUVER_TIMEOUT,
                       MISSION_TIMEOUT, RETURN_TIMEOUT)
 
 
@@ -102,6 +103,43 @@ def event_data(observer, suffix, timeout=3):
         return observer.telemetry(timeout=timeout), {}
     event = observer.latest(suffix, timeout)
     return event.get("data", {}).get("data", {}), event
+
+
+def hub_flight_state(instance_id):
+    response = httpx.get(f"{HUB}/api/v1/instances/{instance_id}/flight", timeout=5)
+    response.raise_for_status()
+    return response.json()
+
+
+def hub_execution(instance_id, execution_id):
+    response = httpx.get(
+        f"{HUB}/api/v1/instances/{instance_id}/flight/executions/{execution_id}", timeout=5)
+    response.raise_for_status()
+    return response.json()
+
+
+def wait_hub_landed_at_station(flight, instance_id, observer, model, station, timeout=RETURN_TIMEOUT):
+    deadline = time.monotonic() + timeout
+    stable_since = None
+    latest = None
+    while time.monotonic() < deadline:
+        state = hub_flight_state(instance_id)
+        latest = observer.telemetry()
+        velocity = latest.get("velocity", {})
+        speed = math.sqrt(sum(float(velocity.get(axis, 0)) ** 2 for axis in
+                              ("north_m_s", "east_m_s", "down_m_s")))
+        pose = flight.gazebo.current(model)
+        horizontal = math.hypot(pose["position"]["x"] - station["x"],
+                                pose["position"]["y"] - station["y"])
+        on_ground = str(state.get("landed_state", "")).upper() in {"ON_GROUND", "LANDED"}
+        if state.get("armed") is False and on_ground and speed < .2 and horizontal <= 3:
+            stable_since = stable_since or time.monotonic()
+            if time.monotonic() - stable_since >= 2:
+                return state
+        else:
+            stable_since = None
+        time.sleep(.2)
+    raise AssertionError(f"Hub/Gazebo did not confirm landing at station: {latest}; {state if 'state' in locals() else None}")
 
 
 def altitude(data):
@@ -262,6 +300,149 @@ def test_real_offboard_stale_input_stops_then_returns(flight):
     station = flight.native_geodetic(created["simulation"]["pose"]["position"])
     landed = flight.wait_landed(drone_id, station)
     assert landed["armed"] is False
+
+
+def test_real_offboard_disconnect_stops_then_returns(flight):
+    created = flight.create_drone()
+    drone_id = created["id"]
+    observer = flight.observers[-1]
+    initial = altitude(event_data(observer, "telemetry")[0])
+    session = flight.request("POST", f"/api/v1/drones/{drone_id}/flight/offboard/sessions",
+                             expected=(201,), json={"request_id": str(uuid.uuid4())}).json()
+    ws = control_socket(drone_id, session)
+    flight.request("POST", f"/api/v1/drones/{drone_id}/flight/offboard/sessions/{session['session_id']}/arm",
+                   expected=(202,), json={"request_id": str(uuid.uuid4())})
+    seq = drive(ws, 0, .8, up=.6)
+    seq, airborne = drive_to_altitude(ws, seq, observer, initial, {"up": .6}, target_delta=2.5)
+    assert altitude(airborne) >= initial + 2.5
+
+    # Simulate the phone disappearing by abruptly closing its control socket.
+    disconnected_at = time.monotonic()
+    ws.close()
+    deadline = disconnected_at + 3
+    speed = float("inf")
+    while time.monotonic() < deadline:
+        velocity = observer.telemetry(timeout=2).get("velocity", {})
+        speed = math.sqrt(sum(float(velocity.get(axis, 0)) ** 2 for axis in
+                              ("north_m_s", "east_m_s", "down_m_s")))
+        if speed < .3:
+            break
+        time.sleep(.15)
+    assert speed < .3, f"disconnect did not stop motion within 3s: {speed:.2f}m/s"
+
+    deadline = disconnected_at + 7
+    state = None
+    while time.monotonic() < deadline:
+        state = flight.request("GET", f"/api/v1/drones/{drone_id}/flight").json()
+        if state.get("offboard", {}).get("status") == "returning":
+            break
+        time.sleep(.15)
+    assert state and state.get("offboard", {}).get("status") == "returning", \
+        f"socket loss did not start RTL within 5-6s: {state}"
+    assert flight.wait_landed(drone_id,
+        flight.native_geodetic(created["simulation"]["pose"]["position"]))["armed"] is False
+
+
+def test_real_offboard_returns_after_backend_loss(flight):
+    created = flight.create_drone()
+    drone_id = created["id"]
+    instance_id = flight.instance_ids[drone_id]
+    hub_observer = flight.hub_telemetry(instance_id)
+    initial = altitude(event_data(flight.observers[-1], "telemetry")[0])
+    session = flight.request("POST", f"/api/v1/drones/{drone_id}/flight/offboard/sessions",
+                             expected=(201,), json={"request_id": str(uuid.uuid4())}).json()
+    ws = control_socket(drone_id, session)
+    flight.request("POST", f"/api/v1/drones/{drone_id}/flight/offboard/sessions/{session['session_id']}/arm",
+                   expected=(202,), json={"request_id": str(uuid.uuid4())})
+    seq = drive(ws, 0, .8, up=.6)
+    seq, airborne = drive_to_altitude(ws, seq, flight.observers[-1], initial,
+                                      {"up": .6}, target_delta=2.5)
+    assert altitude(airborne) >= initial + 2.5
+
+    # The host runner stops Backend while PX4 Hub and Gazebo remain available.
+    FlightEnvironment.request_backend_restart("offboard")
+    with pytest.raises(Exception):
+        ws.recv(timeout=2)
+    ws.close()
+    assert flight.request("GET", "/api/v1/drones/").json() == [], \
+        "Backend restart unexpectedly restored its in-memory public drone registry"
+
+    deadline = time.monotonic() + 10
+    state = None
+    while time.monotonic() < deadline:
+        state = hub_flight_state(instance_id)
+        if state.get("offboard", {}).get("status") == "returning":
+            break
+        time.sleep(.2)
+    assert state and state.get("offboard", {}).get("status") == "returning", \
+        f"Backend loss did not trigger Offboard watchdog RTL: {state}"
+    station = created["simulation"]["pose"]["position"]
+    wait_hub_landed_at_station(flight, instance_id, hub_observer, created["name"], station)
+
+
+def test_real_offboard_drone_reset_invalidates_old_session_generation(flight):
+    created = flight.create_drone()
+    drone_id = created["id"]
+    model = created["name"]
+    old_instance = flight.instance_ids[drone_id]
+    old_generation = flight.request("GET", f"/api/v1/drones/{drone_id}/flight").json()["generation"]
+    original_pose = flight.gazebo.current(model)["position"]
+    initial = altitude(event_data(flight.observers[-1], "telemetry")[0])
+    session = flight.request("POST", f"/api/v1/drones/{drone_id}/flight/offboard/sessions",
+                             expected=(201,), json={"request_id": str(uuid.uuid4())}).json()
+    ws = control_socket(drone_id, session)
+    flight.request("POST", f"/api/v1/drones/{drone_id}/flight/offboard/sessions/{session['session_id']}/arm",
+                   expected=(202,), json={"request_id": str(uuid.uuid4())})
+    seq = drive(ws, 0, .8, up=.6)
+    seq, airborne = drive_to_altitude(ws, seq, flight.observers[-1], initial,
+                                      {"up": .6}, target_delta=2)
+    assert altitude(airborne) >= initial + 2
+    navsat_topic = next(sensor["topic"] for sensor in created["simulation"]["sensors"]
+                        if sensor["type"] == "navsat")
+    navsat = flight.observe_navsat(navsat_topic)
+
+    started = time.monotonic()
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        reset_request = executor.submit(httpx.post, BACKEND + f"/api/v1/drones/{drone_id}/reset",
+                                        timeout=120)
+        while not reset_request.done():
+            flight.archive_live_px4_instances("drone-reset-startup", {old_instance})
+            time.sleep(1)
+        response = reset_request.result()
+    flight.command_log.append({"kind": "gazebo_navsat_samples", "topic": navsat_topic,
+                               "samples": navsat.snapshot()})
+    flight.command_log.append({"monotonic": started, "method": "POST",
+                               "path": f"/api/v1/drones/{drone_id}/reset",
+                               "status": response.status_code, "response": response.json()})
+    assert response.status_code == 200, f"drone reset failed: {response.status_code} {response.text}"
+    reset = response.json()
+    assert reset["id"] == drone_id and reset["status"] == "ready", reset
+    gaz = flight.request("GET", f"http://gazebo-service:8000/api/v1/drones/{reset['simulation']['drone_id']}/").json()
+    new_model = gaz.get("gazebo_model")
+    assert new_model and new_model != model, f"reset reused Gazebo model name: {gaz}"
+    flight.gazebo.tracked_names.add(new_model)
+    with pytest.raises(Exception):
+        ws.recv(timeout=2)
+    ws.close()
+
+    autopilot = flight.request("GET", f"/api/v1/drones/{drone_id}/autopilot").json()
+    new_instance = autopilot["id"]
+    assert new_instance != old_instance, "drone reset reused the old PX4 instance"
+    flight.instance_ids[drone_id] = new_instance
+    state = flight.wait_ready(drone_id)
+    assert state["generation"] != old_generation
+    restored = flight.gazebo.current(new_model)["position"]
+    assert math.dist((restored["x"], restored["y"], restored["z"]),
+                     (original_pose["x"], original_pose["y"], original_pose["z"])) <= .5, \
+        f"drone reset did not restore its initial Gazebo pose: {restored} vs {original_pose}"
+    flight.request("GET", f"http://px4-hub:8002/api/v1/instances/{old_instance}/flight",
+                   expected=(404,))
+
+    # The same public drone is controllable after reset with a new session.
+    fresh = flight.request("POST", f"/api/v1/drones/{drone_id}/flight/offboard/sessions",
+                           expected=(201,), json={"request_id": str(uuid.uuid4())}).json()
+    flight.request("DELETE", f"/api/v1/drones/{drone_id}/flight/offboard/sessions/{fresh['session_id']}",
+                   expected=(202,))
 
 
 def test_real_mission_cancel_returns_and_is_idempotent(flight):
@@ -521,7 +702,7 @@ def test_real_offboard_input_recovers_before_watchdog_rtl(flight):
         flight.native_geodetic(created["simulation"]["pose"]["position"]))["armed"] is False
 
 
-def test_real_offboard_duplicate_sequence_does_not_extend_watchdog(flight):
+def assert_rejected_input_does_not_extend_watchdog(flight, invalid_message):
     created = flight.create_drone()
     drone_id = created["id"]
     initial = altitude(event_data(flight.observers[-1], "telemetry")[0])
@@ -533,14 +714,10 @@ def test_real_offboard_duplicate_sequence_does_not_extend_watchdog(flight):
                        expected=(202,), json={"request_id": str(uuid.uuid4())})
         seq = drive(ws, 0, .8, up=.6)
         seq, _ = drive_to_altitude(ws, seq, flight.observers[-1], initial, {"up": .6}, target_delta=2)
-        duplicate = seq - 1
-        ws.send(__import__("json").dumps({"seq": duplicate, "forward": .8, "right": 0,
-                                          "up": 0, "yaw": 0}))
+        ws.send(__import__("json").dumps(invalid_message(seq)))
         error = __import__("json").loads(ws.recv(timeout=2))
         assert error.get("type") == "error" and error.get("code") == "invalid_offboard_input", error
         rejected_at = time.monotonic()
-        with pytest.raises(Exception):
-            ws.recv(timeout=2)
     finally:
         ws.close()
 
@@ -567,6 +744,16 @@ def test_real_offboard_duplicate_sequence_does_not_extend_watchdog(flight):
     assert state and state.get("offboard", {}).get("status") == "returning", state
     assert flight.wait_landed(drone_id,
         flight.native_geodetic(created["simulation"]["pose"]["position"]))["armed"] is False
+
+
+def test_real_offboard_duplicate_sequence_does_not_extend_watchdog(flight):
+    assert_rejected_input_does_not_extend_watchdog(flight, lambda seq: {
+        "seq": seq - 1, "forward": .8, "right": 0, "up": 0, "yaw": 0})
+
+
+def test_real_offboard_invalid_axis_does_not_extend_watchdog(flight):
+    assert_rejected_input_does_not_extend_watchdog(flight, lambda seq: {
+        "seq": seq, "forward": 1.1, "right": 0, "up": 0, "yaw": 0})
 
 
 def test_real_mission_autonomy_and_snapshot_survive_update_delete(flight):
@@ -609,6 +796,49 @@ def test_real_mission_autonomy_and_snapshot_survive_update_delete(flight):
     assert any(item["status"] == "active" for item in history)
     station = flight.native_geodetic(created["simulation"]["pose"]["position"])
     assert flight.wait_landed(drone_id, station)["armed"] is False
+
+
+def test_real_mission_continues_after_backend_loss(flight):
+    created = flight.create_drone()
+    drone_id = created["id"]
+    instance_id = flight.instance_ids[drone_id]
+    hub_observer = flight.hub_telemetry(instance_id)
+    waypoints = [{"x": 16, "y": -8, "z": 6}, {"x": 16, "y": -4, "z": 8},
+                 {"x": 12, "y": -4, "z": 7}, {"x": 8, "y": -8, "z": 6}]
+    mission = flight.mission(f"backend-loss-{uuid.uuid4().hex[:8]}", waypoints)
+    accepted = flight.request("POST", f"/api/v1/drones/{drone_id}/flight/missions", expected=(202,), json={
+        "mission_id": mission["id"], "revision": mission["revision"],
+        "request_id": str(uuid.uuid4())}).json()
+
+    # Backend is unavailable briefly while PX4 executes the uploaded route.
+    FlightEnvironment.request_backend_restart("mission")
+    assert flight.request("GET", "/api/v1/drones/").json() == [], \
+        "Backend restart unexpectedly restored its in-memory public drone registry"
+    deadline = time.monotonic() + MISSION_TIMEOUT
+    execution = None
+    while time.monotonic() < deadline:
+        execution = hub_execution(instance_id, accepted["execution_id"])
+        if execution.get("status") in {"completed", "failed", "interrupted"}:
+            break
+        time.sleep(.25)
+    assert execution and execution.get("status") == "completed", \
+        f"Mission did not complete autonomously across Backend loss: {execution}"
+
+    reached = 0
+    for record in flight.gazebo.records:
+        if record["name"] != created["name"]:
+            continue
+        pose = record["position"]
+        target = waypoints[reached]
+        if (math.hypot(pose["x"] - target["x"], pose["y"] - target["y"]) <= 2
+                and abs(pose["z"] - target["z"]) <= 1.5):
+            reached += 1
+            if reached == len(waypoints):
+                break
+    assert reached == len(waypoints), \
+        f"Mission did not physically visit all waypoints during Backend outage ({reached}/4)"
+    wait_hub_landed_at_station(flight, instance_id, hub_observer, created["name"],
+                               created["simulation"]["pose"]["position"])
 
 
 def test_real_mission_rejects_stale_georeference_and_flies_changed_origin(flight):

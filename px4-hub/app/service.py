@@ -96,7 +96,8 @@ class InstanceService:
             try:
                 drone = await self.gazebo.drone(record.drone_id)
                 valid = (self.world_name == record.world and drone.get("entity_id") == record.entity_id
-                         and drone.get("name") == record.gazebo_model and drone.get("model") == "x500_gimbal")
+                         and drone.get("gazebo_model", drone.get("name")) == record.gazebo_model
+                         and drone.get("model") == "x500_gimbal")
                 record.binding_valid = valid
                 record.binding_error = None if valid else "Gazebo binding changed; backend coordination is required"
             except HubError as exc:
@@ -127,7 +128,8 @@ class InstanceService:
                 raise HubError(409, "instance_limit", "PX4 instance limit reached", {"limit": self.settings.max_instances})
             instance_id = str(uuid.uuid4())
             workdir = self.settings.instance_dir / instance_id
-            record = Instance(instance_id, drone_id, drone["name"], drone.get("entity_id"), slot, self.world_name, workdir)
+            record = Instance(instance_id, drone_id, drone.get("gazebo_model", drone["name"]),
+                              drone.get("entity_id"), slot, self.world_name, workdir)
             record.station_pose = drone.get("pose")
             record.coordinate_context = (await self.gazebo.world()).get("spherical_coordinates")
             self.instances[instance_id] = record
