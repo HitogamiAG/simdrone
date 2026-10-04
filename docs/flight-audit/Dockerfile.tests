@@ -1,0 +1,4 @@
+FROM uav-px4-hub:local
+USER root
+RUN /opt/venv/bin/pip install --no-cache-dir pytest==8.3.5
+USER px4

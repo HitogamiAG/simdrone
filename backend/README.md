@@ -2,6 +2,8 @@
 
 Backend — публичный FastAPI-оркестратор Gazebo Service и PX4 Hub. `main.py` собирает FastAPI и lifespan, `api.py` содержит HTTP/WebSocket-маршруты, `service.py` — сценарии, `adapters.py` — HTTP-клиенты зависимостей, `realtime.py` — общие подписки. Backend выдаёт устойчивый в пределах работы процесса `drone_id`, сериализует изменяющие сценарии одним lock и сводит диагностику. Gazebo Service владеет миром/моделями, PX4 Hub — SITL/MAVSDK процессами, MediaMTX — публикацией видео. Реестр Backend хранится только в памяти.
 
+**Статус Flight API:** частичная реализация; критерии согласованного плана не выполнены. Аудит обнаружил ошибки эксклюзивности, восстановления после отказов, координат и lifecycle. Подробности и воспроизводимые проверки: [отчёт аудита](../docs/flight-api-audit.md). Реальные полёты этих режимов ещё не проверены.
+
 ## Запуск и конфигурация
 
 Из корня репозитория:
@@ -35,10 +37,13 @@ Backend использует `GAZEBO_API_URL`, `PX4_HUB_API_URL`, `MEDIAMTX_API_
 | WS | `/api/v1/realtime` | Общий поток с командами `subscribe` / `unsubscribe` |
 | CRUD | `/api/v1/missions/` | Определения миссий и optimistic revision updates в SQLite |
 | POST | `/api/v1/missions/{id}/validate` | Проверить маршрут для дрона и текущего PX4 instance |
-| GET / POST | `/api/v1/drones/{id}/flight` | Состояние полёта / запуск миссии |
-| GET / POST | `/api/v1/drones/{id}/flight/executions/{execution_id}` | Прогресс / отмена с возвратом на станцию |
+| GET | `/api/v1/drones/{id}/flight` | Состояние полёта |
+| POST | `/api/v1/drones/{id}/flight/missions` | Принять запуск миссии |
+| GET | `/api/v1/drones/{id}/flight/executions/{execution_id}` | Состояние выполнения |
+| POST | `/api/v1/drones/{id}/flight/executions/{execution_id}/cancel` | Запросить отмену и RTL |
 | POST | `/api/v1/drones/{id}/flight/{return,land}` | RTL или посадка в текущем месте |
-| POST / GET / DELETE | `/api/v1/drones/{id}/flight/offboard/sessions` | Резервирование и завершение управления джойстиком |
+| POST | `/api/v1/drones/{id}/flight/offboard/sessions` | Создать сессию управления |
+| GET / DELETE | `/api/v1/drones/{id}/flight/offboard/sessions/{session_id}` | Прочитать / закрыть сессию |
 | POST | `/api/v1/drones/{id}/flight/offboard/sessions/{session_id}/{arm,disarm}` | Включение Offboard на земле / disarm после посадки |
 | WS | `/api/v1/drones/{id}/flight/offboard/sessions/{session_id}/control` | Ввод джойстика с token и возрастающим `seq` |
 
@@ -48,7 +53,9 @@ World-reset/reboot не создаёт runtime-дроны снова: Backend и
 
 Ошибки имеют вид `{"error":{"code":"...","message":"...","details":...}}`; ошибки схемы также сериализуются в этот формат и возвращают `422`. При создании Backend заранее проверяет занятость имени. Если ответ Gazebo потерян, Backend ищет созданную модель по уникальному имени и удаляет её только после подтверждения, что PX4 instance отсутствует или удалён. При неизвестном состоянии PX4 модель сохраняется для безопасного согласования. Mission definitions сохраняются в SQLite (`MISSION_DB`, по умолчанию `/data/missions.sqlite3`) на Compose volume `backend-missions`; запуски и их история остаются в памяти. Миссия привязана к имени мира и снимку его `spherical_coordinates`; Hub повторно проверяет их перед стартом. Маршрут задаётся точками XYZ Gazebo в метрах, общей скоростью и высотами взлёта/возврата. Обход препятствий и точная посадка по метке отсутствуют.
 
-Миссия выполняется в PX4 независимо от браузера. Отмена переводит её в RTL; успех подтверждается только после наблюдаемых посадки и disarm. Offboard доступен одному управляющему WS-клиенту; token выдаётся при создании сессии и передаётся первым сообщением. Оси ввода — нормализованные `forward/right/up/yaw`, команды задают скорость. Hub обнуляет скорости после 0,5 с без свежего ввода и запускает RTL после 5 с. Входящий ввод подтверждает приём команды, но не физическое движение. Сессия создаётся без arm; браузер сначала подключает WS, затем явно вызывает arm. `capabilities.flight_control`, `manual_control` и `missions` включены для поддерживаемого PX4 instance.
+В коде предусмотрены загрузка MissionRaw в PX4, запрос RTL при отмене и Offboard через поток `forward/right/up/yaw` с token и возрастающим `seq`. Штатный watchdog задаёт нулевую скорость после 0,5 с и запрашивает RTL после 5 с. Реальное движение, прямой взлёт и возвращение на станцию этими проверками не подтверждены. Обнаружены нарушения эксклюзивности и восстановления после частичного отказа; текущая проверка завершения не требует свежей телеметрии и близости станции. Публичные `capabilities.flight_control`, `manual_control` и `missions` сейчас включены безусловно и не доказывают готовность этих режимов.
+
+Канал `drone.{drone_id}.flight` добавлен в `/api/v1/realtime`; сквозное наблюдение flight-состояния через Backend пока не проверено.
 
 ## Realtime и видео
 
