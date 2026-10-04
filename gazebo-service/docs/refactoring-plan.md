@@ -157,7 +157,7 @@ Unit-тесты API используют приложение с fake runtime ч
 
 Создать GazeboProcess, GazeboClient и PoseTracker. Перенести существующие Transport/state-модули в `gazebo/`; обновить относительный импорт `_transport_request`, оставив нативный модуль и команду сборки совместимыми.
 
-Публичный клиент должен покрывать status/readiness, scene, component snapshot, SDF export, world control/settings, set_pose, create/remove blocking, discovery и подписки. Сценарии больше не обращаются к приватным полям `third-party.src.world.World`. Совместимость с существующим wrapper изолировать внутри client, без изменения его публичного API в рамках этого плана.
+Публичный клиент должен покрывать status/readiness, scene, component snapshot, SDF export, world control/settings, set_pose, create/remove blocking, discovery и подписки. Реализация `World` размещена в `app.gazebo.world`, а адаптер доступен через `app.gazebo.client`; внешняя Python-папка для запуска сервиса не нужна.
 
 Проверки: старт/reboot/shutdown, текущие компоненты и позы, запросы при активной подписке, отсутствие оставшихся Gazebo/FFmpeg.
 

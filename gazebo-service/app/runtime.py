@@ -96,7 +96,7 @@ class RuntimeCoordinator:
             self._start_world()
 
     def _start_world(self):
-        world_path = self.settings.world_path if self.settings.world_path.exists() else LOCAL_ROOT.parent / "third-party/worlds/empty.sdf"
+        world_path = self.settings.world_path
         if not world_path.is_file():
             raise RuntimeError(f"world file does not exist: {world_path}")
         self.world = GazeboClient(self.settings.world_name, self.settings.request_timeout_ms)

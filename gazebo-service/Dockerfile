@@ -1,7 +1,7 @@
 FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \
-    GZ_VERSION=harmonic GZ_PARTITION=uav-sim GZ_SIM_RESOURCE_PATH=/opt/uav/models:/opt/uav/third-party/models:/opt/uav/app/models \
+    GZ_VERSION=harmonic GZ_PARTITION=uav-sim GZ_SIM_RESOURCE_PATH=/opt/uav/app/models:/opt/uav/models \
     LIBGL_ALWAYS_SOFTWARE=1 MESA_GL_VERSION_OVERRIDE=4.5
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -25,9 +25,6 @@ RUN git init /tmp/PX4-gazebo-models && cd /tmp/PX4-gazebo-models && \
     mkdir -p /opt/uav/models && cp -a models/. /opt/uav/models/ && \
     rm -rf /tmp/PX4-gazebo-models
 
-COPY third-party/models /opt/uav/third-party/models
-COPY third-party/src /opt/uav/third-party/src
-COPY third-party/worlds /opt/uav/third-party/worlds
 COPY gazebo-service/requirements.txt /opt/uav/requirements.txt
 RUN python3 -m venv --system-site-packages /opt/venv && \
     /opt/venv/bin/pip install --no-cache-dir -r requirements.txt

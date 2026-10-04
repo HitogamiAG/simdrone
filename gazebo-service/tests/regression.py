@@ -7,8 +7,7 @@ import httpx
 import websockets
 from websockets.exceptions import ConnectionClosed
 
-import app  # register the bundled third-party package path
-from src.world import World
+from app.gazebo.world import World
 
 
 BASE = "http://127.0.0.1:8000"

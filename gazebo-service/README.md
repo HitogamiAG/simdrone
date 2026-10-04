@@ -169,7 +169,7 @@ docker compose exec -T gazebo-service ffmpeg \
 
 | Параметры | Назначение |
 | --- | --- |
-| `WORLD_FILE`, `WORLD_NAME` | SDF из `third-party/worlds` и имя мира внутри него |
+| `WORLD_FILE`, `WORLD_NAME` | SDF из `gazebo-service/app/worlds` и имя мира внутри него |
 | `API_PORT`, `RTSP_PORT`, `RTP_PORT`, `RTCP_PORT`, `HLS_PORT`, `WEBRTC_PORT`, `WEBRTC_UDP_PORT` | Публикуемые Compose порты |
 | `WEBRTC_ALLOWED_ORIGIN`, `WEBRTC_ADDITIONAL_HOSTS`, `WEBRTC_IPS_FROM_INTERFACES` | Origin браузера и ICE адреса, публикуемые MediaMTX |
 | `GZ_PARTITION` | Изоляция Gazebo Transport |
@@ -179,7 +179,7 @@ docker compose exec -T gazebo-service ffmpeg \
 | `MEDIAMTX_API_USER`, `MEDIAMTX_API_PASSWORD` | Доступ сервиса к API MediaMTX |
 | `LOG_LEVEL` | Логирование приложения |
 
-`WORLD_SDF`, `MODEL_ROOTS` и `GZ_SIM_RESOURCE_PATH` задаются в [`docker-compose.yml`](../docker-compose.yml). Для собственного размещения SDF или каталога нужно менять также пути/тома Compose. Формат RTSP URL учитывает опубликованный `RTSP_PORT`; адрес читателя по умолчанию — `localhost`.
+`WORLD_SDF`, `MODEL_ROOTS` и `GZ_SIM_RESOURCE_PATH` задаются в [`docker-compose.yml`](../docker-compose.yml). По умолчанию мир, `x500_gimbal`, `gimbal_camera`, meshes и Gazebo World-клиент входят в этот репозиторий под `gazebo-service/app`; `model://x500` берётся из закреплённого PX4-gazebo-models, загружаемого при сборке образа. Gazebo Service не использует внешний каталог исходников. Для собственного размещения SDF или каталога нужно менять также пути/тома Compose. Формат RTSP URL учитывает опубликованный `RTSP_PORT`; адрес читателя по умолчанию — `localhost`.
 
 Закреплены основные зависимости:
 
@@ -220,11 +220,11 @@ docker compose exec -T gazebo-service python /opt/uav/tests/smoke.py
 
 | Проверка | Подтверждённое покрытие |
 | --- | --- |
-| `test_contract.py` | 14 тестов: валидация/API-контракт, сравнение quaternion, декодирование текущего состояния, безопасный отказ reset, инвалидация кеша, частичный отказ PATCH, идемпотентное закрытие SensorSubscription и EncoderSession |
+| `test_contract.py` | 15 тестов: валидация/API-контракт, сравнение quaternion, декодирование текущего состояния, безопасный отказ reset, инвалидация кеша, частичный отказ PATCH, идемпотентное закрытие SensorSubscription и EncoderSession, наличие локальных ресурсов и необходимых Gazebo bindings |
 | `regression.py` | Отказ PATCH позы, текущие позы GET/list/world, внешние Transport-изменения и сохранение соседних настроек, реальная частота/reset сенсора, закрытие нескольких WebSocket при reset/delete, восстановление активной камеры, полный world-reset |
 | `smoke.py` | Старт и готовность, pause/resume, создание с начальной позой/reset/delete, sensor WebSocket и rate PATCH, on-demand получение и декодирование H.264 через MediaMTX и остановка публикации, сенсоры x500_gimbal, отказ неподдерживаемого PATCH, world-reset и reboot |
 
-Последний прогон общего Backend в Docker: Gazebo contract **14 passed**, `regression.py` и `smoke.py` прошли. Браузерный Chrome внутри Docker получил и декодировал WHEP H.264 кадр 1280×720; два клиента разделили одну публикацию, уход первого не прервал второго, уход последнего привёл к camera deactivate. Отдельные сценарии аварии FFmpeg, нескольких независимых камер и медленного Backend WebSocket-клиента ещё нужно расширить.
+Проверка 04.10.2026: Gazebo contract — **15 passed**, `regression.py` и `smoke.py` прошли на обновлённом контейнере с реальными Gazebo Transport и MediaMTX. Это подтвердило загрузку локальных world/model ресурсов, наблюдаемые изменения мира, сенсоры и H.264 RTSP. Браузерный Chrome ранее получил и декодировал WHEP H.264 кадр 1280×720; два клиента разделили одну публикацию, уход первого не прервал второго, уход последнего привёл к camera deactivate. Отдельные сценарии аварии FFmpeg, нескольких независимых камер и медленного Backend WebSocket-клиента ещё нужно расширить.
 
 ## Структура приложения
 

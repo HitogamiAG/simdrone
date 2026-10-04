@@ -6,9 +6,9 @@ services:
     image: uav-gazebo-service:local
     env_file: .env
     environment:
-      WORLD_SDF: /opt/uav/third-party/worlds/${WORLD_FILE:-empty.sdf}
-      MODEL_ROOTS: /opt/uav/third-party/models:/opt/uav/models:/opt/uav/app/models
-      GZ_SIM_RESOURCE_PATH: /opt/uav/models:/opt/uav/third-party/models:/opt/uav/app/models
+      WORLD_SDF: /opt/uav/app/worlds/${WORLD_FILE:-empty.sdf}
+      MODEL_ROOTS: /opt/uav/app/models:/opt/uav/models
+      GZ_SIM_RESOURCE_PATH: /opt/uav/app/models:/opt/uav/models
       GZ_PARTITION: ${GZ_PARTITION:-uav-sim}
       MEDIAMTX_RTSP_HOST: localhost
     ports:

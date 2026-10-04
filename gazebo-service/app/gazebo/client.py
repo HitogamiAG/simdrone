@@ -1,5 +1,5 @@
 """Typed public boundary around the pinned Gazebo Harmonic World wrapper."""
-from src.world import World
+from .world import World
 from .transport import Node
 from .state import SerializedStepMap
 

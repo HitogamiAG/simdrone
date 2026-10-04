@@ -5,3 +5,4 @@
 **/venv
 **/*.pyc
 PX4-Autopilot
+third-party
