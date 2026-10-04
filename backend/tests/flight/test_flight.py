@@ -447,6 +447,10 @@ def test_real_offboard_ownership_token_delete_and_current_location_land(flight):
         ws.close()
     flight.request("DELETE", f"/api/v1/drones/{drone_id}/flight/offboard/sessions/{session['session_id']}",
                    expected=(202,))
+    station = flight.native_geodetic(created["simulation"]["pose"]["position"])
+    # DELETE is asynchronous: confirm fresh disarm/ON_GROUND before reserving
+    # another controller, including the branch where the vehicle never took off.
+    assert flight.wait_landed(drone_id, station)["armed"] is False
 
     # A fresh control owner drives a short climb, then DELETE must RTL and land.
     session = flight.request("POST", session_path, expected=(201,),
@@ -462,7 +466,6 @@ def test_real_offboard_ownership_token_delete_and_current_location_land(flight):
         ws.close()
     flight.request("DELETE", f"/api/v1/drones/{drone_id}/flight/offboard/sessions/{session['session_id']}",
                    expected=(202,))
-    station = flight.native_geodetic(created["simulation"]["pose"]["position"])
     assert flight.wait_landed(drone_id, station)["armed"] is False
 
     # A subsequent session can use land to finish at the current location.
