@@ -162,7 +162,9 @@ def test_real_mission_four_waypoints_progress_return_and_replay(flight):
             with observer.condition:
                 mode_event = observer.latest_by_type.get("flight_mode")
                 flight_mode = mode_event.get("data", {}).get("data") if mode_event else None
-            if now - mission_phase_at >= 12 and flight_mode != "MISSION":
+            completed_route_in_rtl = (flight_mode in {"RETURN_TO_LAUNCH", "RTL"} and
+                                      execution.get("current_waypoint", 0) >= len(waypoints))
+            if now - mission_phase_at >= 12 and flight_mode != "MISSION" and not completed_route_in_rtl:
                 flight.dump("mission-mode-not-entered", {"execution": execution,
                             "flight_mode": flight_mode, "history": history})
                 raise AssertionError(f"Mission remained outside PX4 MISSION mode: {flight_mode}")

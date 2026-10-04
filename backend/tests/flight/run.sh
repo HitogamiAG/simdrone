@@ -34,7 +34,11 @@ run_once() {
     $COMPOSE images --format json >"artifacts/flight/images-${RUN_INDEX}.json"
     $COMPOSE build flight-runner
     set +e
-    $COMPOSE run --rm --no-deps flight-runner >"artifacts/flight/run-${RUN_INDEX}.log" 2>&1
+    if [ -n "${FLIGHT_TEST_FILTER:-}" ]; then
+        $COMPOSE run --rm --no-deps flight-runner python -m pytest -q test_flight.py -k "$FLIGHT_TEST_FILTER" >"artifacts/flight/run-${RUN_INDEX}.log" 2>&1
+    else
+        $COMPOSE run --rm --no-deps flight-runner >"artifacts/flight/run-${RUN_INDEX}.log" 2>&1
+    fi
     RESULT=$?
     set -e
     cat "artifacts/flight/run-${RUN_INDEX}.log"

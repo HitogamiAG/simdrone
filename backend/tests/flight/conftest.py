@@ -5,6 +5,8 @@ import json
 import math
 import os
 import queue
+import re
+import shutil
 import subprocess
 import threading
 import time
@@ -121,6 +123,7 @@ class Px4LogObserver:
     def __init__(self, instance_id: str):
         self.instance_id = instance_id
         self.records: list[dict] = []
+        self.last_message = None
         self.stop_event = threading.Event()
         self.thread = threading.Thread(target=self._run, daemon=True)
 
@@ -140,8 +143,18 @@ class Px4LogObserver:
                     except TimeoutError:
                         continue
                     record = {"monotonic": time.monotonic(), **event}
-                    # The Hub log protocol carries process output only. Still
-                    # redact credential-shaped fields defensively in artifacts.
+                    message = record.get("message", "")
+                    message = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", message).replace("\r", "\n")
+                    message = re.sub(r"(?:pxh>\s*)+", "", message).strip()
+                    if (not re.search(r"(?:INFO|WARN|ERROR|CRITICAL|DEBUG)\s+\[[^]]+\]", message)
+                            or message == self.last_message):
+                        continue
+                    record["message"] = message[:8192]
+                    self.last_message = message
+                    # PX4 emits a repeated shell prompt continuously; cap the
+                    # diagnostic stream so it cannot dominate flight evidence.
+                    if len(self.records) >= 20_000:
+                        self.records.pop(0)
                     self.records.append(FlightEnvironment._redact(record))
         except Exception as exc:
             if not self.stop_event.is_set():
@@ -215,6 +228,8 @@ class FlightEnvironment:
         self.gazebo = GazeboPoseObserver()
         self.observers: list[TelemetryObserver] = []
         self.px4_logs: dict[str, Px4LogObserver] = {}
+        self.instance_ids: dict[str, str] = {}
+        self.archived_instances: set[str] = set()
         self.drones: list[str] = []
         self.stations: dict[str, dict] = {}
         self.geo_context: dict = {}
@@ -254,6 +269,7 @@ class FlightEnvironment:
         autopilot = self.request("GET", f"/api/v1/drones/{drone_id}/autopilot").json()
         instance_id = autopilot.get("id")
         if instance_id:
+            self.instance_ids[drone_id] = instance_id
             self.px4_logs[drone_id] = Px4LogObserver(instance_id).start()
         observer = TelemetryObserver(drone_id).start()
         self.observers.append(observer)
@@ -334,6 +350,55 @@ class FlightEnvironment:
 
     def dump(self, label: str, extra=None):
         ARTIFACTS.mkdir(parents=True, exist_ok=True)
+        archived_px4 = {}
+        root = Path(os.getenv("PX4_INSTANCE_ARTIFACTS", "/px4-instances"))
+        for drone_id, instance_id in self.instance_ids.items():
+            if instance_id in self.archived_instances:
+                archived_px4[drone_id] = {"instance_id": instance_id, "files": "archived by earlier snapshot"}
+                continue
+            instance_root = root / instance_id
+            if not instance_root.exists():
+                archived_px4[drone_id] = {"instance_id": instance_id, "error": "instance files unavailable"}
+                continue
+            destination = ARTIFACTS / "px4" / label / instance_id
+            copied = []
+            for source in instance_root.rglob("*"):
+                if not source.is_file():
+                    continue
+                if source.suffix == ".ulg" or source.name == "mavsdk.log":
+                    target = destination / source.relative_to(instance_root)
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(source, target)
+                    copied.append({"path": str(target.relative_to(ARTIFACTS)), "bytes": target.stat().st_size})
+                    if source.suffix == ".ulg":
+                        try:
+                            from pyulog import ULog
+                            parsed = ULog(str(target))
+                            topics = {item.name: item.data for item in parsed.data_list}
+                            result = topics.get("mission_result", {})
+                            fields = ("seq_current", "seq_reached", "seq_total", "finished", "failure", "warning")
+                            summary = {
+                                "parser": "pyulog==1.2.3",
+                                "messages": [{"timestamp": item.timestamp,
+                                    "level": item.log_level_str(), "message": item.message}
+                                    for item in parsed.logged_messages],
+                                "mission_result_tail": {key: result[key][-20:].tolist()
+                                    for key in fields if key in result},
+                            }
+                            summary_path = target.with_suffix(".summary.json")
+                            summary_path.write_text(json.dumps(summary, indent=2, default=str))
+                            copied.append({"path": str(summary_path.relative_to(ARTIFACTS)),
+                                           "bytes": summary_path.stat().st_size})
+                        except Exception as exc:
+                            copied.append({"ulog_parse_error": repr(exc)})
+                elif source.name == "px4.log":
+                    target = destination / "px4.log.filtered.txt"
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    size = self._filter_px4_log(source, target, max_bytes=8 * 1024 * 1024)
+                    copied.append({"path": str(target.relative_to(ARTIFACTS)), "bytes": size,
+                                   "source_bytes": source.stat().st_size, "filtered": True})
+            self.archived_instances.add(instance_id)
+            archived_px4[drone_id] = {"instance_id": instance_id, "files": copied}
         document = {"label": label, "monotonic": time.monotonic(), "extra": self._redact(extra),
                     "drones": self.drones, "world": self.request("GET", "/api/v1/world").json(),
                     "status": self.request("GET", "/api/v1/system/status").json(),
@@ -341,10 +406,50 @@ class FlightEnvironment:
                     "telemetry": {obs.drone_id: obs.records for obs in self.observers},
                     "px4_process_logs": {drone_id: observer.records
                                          for drone_id, observer in self.px4_logs.items()},
+                    "px4_archives": archived_px4,
                     "gazebo_poses": self.gazebo.records}
         path = ARTIFACTS / f"{int(time.time())}-{label}.json"
         path.write_text(json.dumps(document, indent=2, default=str))
         return path
+
+    @staticmethod
+    def _filter_px4_log(source: Path, target: Path, max_bytes: int) -> int:
+        ansi = re.compile(rb"\x1b\[[0-?]*[ -/]*[@-~]")
+        useful = re.compile(rb"(?:INFO|WARN|ERROR|CRITICAL|DEBUG)\s+\[[^]]+\]")
+        pending = b""
+        written = 0
+        truncated = False
+        with source.open("rb") as src, target.open("wb") as dst:
+            while chunk := src.read(65536):
+                pending += chunk
+                lines = re.split(rb"[\r\n]+", pending)
+                pending = lines.pop()
+                for line in lines:
+                    clean = ansi.sub(b"", line)
+                    if not useful.search(clean):
+                        continue
+                    output = clean.strip() + b"\n"
+                    if written + len(output) > max_bytes:
+                        truncated = True
+                        break
+                    dst.write(output)
+                    written += len(output)
+                if truncated:
+                    break
+            if not truncated and pending:
+                clean = ansi.sub(b"", pending)
+                if useful.search(clean):
+                    output = clean.strip() + b"\n"
+                    if written + len(output) <= max_bytes:
+                        dst.write(output)
+                        written += len(output)
+                    else:
+                        truncated = True
+            if truncated:
+                marker = b"\n[PX4 process log filtered at 8 MiB]\n"
+                dst.write(marker)
+                written += len(marker)
+        return written
 
     def close(self):
         # Cleanup is best-effort; it never converts a failed flight into success.

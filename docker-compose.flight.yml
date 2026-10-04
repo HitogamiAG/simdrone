@@ -28,6 +28,8 @@ services:
       GAZEBO_API_URL: http://gazebo-service:8000
       MAX_INSTANCES: 3
       GZ_PARTITION: simdrone-flight-test
+    volumes:
+      - flight-test-px4-state:/opt/uav/instances
 
   backend:
     extends:
@@ -69,8 +71,10 @@ services:
       GAZEBO_URL: http://gazebo-service:8000
       GZ_PARTITION: simdrone-flight-test
       FLIGHT_ARTIFACTS: /artifacts
+      PX4_INSTANCE_ARTIFACTS: /px4-instances
     volumes:
       - ./artifacts/flight:/artifacts
+      - flight-test-px4-state:/px4-instances:ro
     depends_on:
       backend:
         condition: service_healthy
@@ -78,6 +82,7 @@ services:
 
 volumes:
   flight-test-missions:
+  flight-test-px4-state:
 
 networks:
   default:
