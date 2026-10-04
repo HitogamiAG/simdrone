@@ -238,7 +238,12 @@ class FlightEnvironment:
     def request(self, method: str, path: str, *, expected=(200,), **kwargs):
         started = time.monotonic()
         url = path if path.startswith(("http://", "https://")) else BACKEND + path
-        response = self.http.request(method, url, timeout=kwargs.pop("timeout", 30), **kwargs)
+        try:
+            response = self.http.request(method, url, timeout=kwargs.pop("timeout", 30), **kwargs)
+        except httpx.HTTPError as exc:
+            self.command_log.append({"monotonic": started, "method": method, "path": path,
+                                     "status": None, "error": repr(exc)})
+            raise
         self.command_log.append({"monotonic": started, "method": method, "path": path,
                                  "status": response.status_code,
                                  "response": self._redact(response.json()) if response.content else None})
@@ -255,9 +260,9 @@ class FlightEnvironment:
             return [FlightEnvironment._redact(item) for item in value]
         return value
 
-    def create_drone(self, x=12, y=-8, z=1):
+    def create_drone(self, x=12, y=-8, z=1, timeout=30):
         self.geo_context = self.request("GET", "/api/v1/world").json()["spherical_coordinates"]
-        response = self.request("POST", "/api/v1/drones/", expected=(201,), json={
+        response = self.request("POST", "/api/v1/drones/", expected=(201,), timeout=timeout, json={
             "model": "x500_gimbal", "name": f"flight_{int(time.time())}_{len(self.drones)}",
             "pose": {"position": {"x": x, "y": y, "z": z}},
         }).json()
