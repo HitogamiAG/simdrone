@@ -5,7 +5,7 @@ import asyncio
 import time
 from types import SimpleNamespace
 
-from app.flight import Execution, FlightController, _geo, _mission_items
+from app.flight import Execution, FlightController, _geo, _mission_items, _mission_route_finished
 from app.api import create_app
 from app.adapters import Px4Adapter
 
@@ -35,6 +35,13 @@ def test_missionraw_current_flag_selects_first_navigation_waypoint():
                       {"x": 3.0, "y": 4.0, "z": 7.0}]})
     assert [item.current for item in items] == [0, 1, 0, 0]
     assert items[1].command == 16
+
+
+def test_missionraw_terminal_rtl_item_completes_route_after_all_waypoints():
+    assert _mission_route_finished(4, 4, "RETURN_TO_LAUNCH")
+    assert _mission_route_finished(4, 4, "RTL")
+    assert not _mission_route_finished(3, 4, "RETURN_TO_LAUNCH")
+    assert not _mission_route_finished(4, 4, "MISSION")
 
 
 def test_offboard_velocity_is_limited_by_active_px4_and_resultant_speed(monkeypatch):
@@ -100,6 +107,27 @@ def test_watchdog_holds_then_returns_after_control_input_is_lost(monkeypatch):
         assert offboard.values[-1] == (0.0, 0.0, -0.0, 0.0)
         assert offboard.stopped and action.rtl == 1
         await controller.delete_session(created["session_id"])
+
+    asyncio.run(scenario())
+
+
+def test_watchdog_retries_rtl_until_telemetry_confirms_mode():
+    async def scenario():
+        controller, record, calls = _safety_fixture()
+        await controller.create_session()
+        session = controller.session
+        session.armed = False
+        session.status = "returning"
+        record.telemetry.latest["flight_mode"] = "RETURN_TO_LAUNCH"
+        session.rtl_last_requested = time.monotonic() - 1.1
+        session.watchdog = asyncio.create_task(controller._watchdog(session))
+        await asyncio.sleep(.15)
+        assert calls.count("rtl") == 0
+        record.telemetry.latest["flight_mode"] = "HOLD"
+        session.rtl_last_requested = time.monotonic() - 1.1
+        await asyncio.sleep(.15)
+        assert calls.count("rtl") >= 1
+        await controller.close()
 
     asyncio.run(scenario())
 

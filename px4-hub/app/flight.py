@@ -40,6 +40,7 @@ class OffboardSession:
     armed: bool = False
     status: str = "ready"
     latest_input: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
+    rtl_last_requested: float = 0.0
     watchdog: asyncio.Task | None = None
 
 
@@ -85,6 +86,12 @@ def _mission_items(mission):
             round(lat * 1e7), round(lon * 1e7), altitude, 0))
     items.append(MissionItem(len(items), 2, 20, 0, 1, 0.0, 0.0, 0.0, 0.0, 0, 0, 0.0, 0))
     return items
+
+
+def _mission_route_finished(current_waypoint, waypoint_count, flight_mode):
+    """PX4 v1.16 marks its final RTL item current before MissionRaw finishes."""
+    return (current_waypoint >= waypoint_count and
+            str(flight_mode).upper() in {"RETURN_TO_LAUNCH", "RTL"})
 
 
 class FlightController:
@@ -298,6 +305,15 @@ class FlightController:
                 # stop publishing once it has landed. Ground/disarmed at the
                 # verified station is the authoritative completion signal.
                 if self._landed_at_station():
+                    if execution.current < len(mission["waypoints"]):
+                        raise RuntimeError("PX4 returned to the station before completing all mission waypoints")
+                    break
+                # PX4 v1.16 reports the terminal NAV_RETURN_TO_LAUNCH item as
+                # current=N+1,total=N+2 and transitions to RTL without ever
+                # reporting current==total. The final RTL item is success
+                # only after every navigational waypoint has been reached.
+                mode = self.telemetry().get("flight_mode", "")
+                if _mission_route_finished(execution.current, len(mission["waypoints"]), mode):
                     break
                 try:
                     progress = await asyncio.wait_for(anext(progress_stream), timeout=.5)
@@ -360,7 +376,9 @@ class FlightController:
         samples = fanout.latest
         landed = samples.get("landed_state", {})
         state = str(landed.get("landed_state", landed.get("state", landed)) if isinstance(landed, dict) else landed).lower()
-        position, station, geo = samples.get("position", {}), self.record.station_pose, self.record.coordinate_context
+        position = samples.get("position", {})
+        station = getattr(self.record, "station_pose", None)
+        geo = getattr(self.record, "coordinate_context", None)
         if samples.get("armed") is not False or not ("on_ground" in state or state == "2") or not station or not geo:
             return False
         if (position.get("latitude_deg") is None or position.get("longitude_deg") is None or
@@ -629,6 +647,17 @@ class FlightController:
                             await self.record.system.action.return_to_launch()
                             session.status, session.armed = "returning", False
                     else:
+                        # A successful MAVSDK RPC is not proof that PX4 changed
+                        # mode. Keep requesting RTL until telemetry confirms it;
+                        # this also covers a lost/consumed mode-command ACK after
+                        # Offboard.stop() has first put PX4 into HOLD.
+                        if session.status == "returning" and not session.armed:
+                            mode = str(self.telemetry().get("flight_mode", "")).upper()
+                            if (mode not in {"RETURN_TO_LAUNCH", "RTL"} and
+                                    not self._landed_at_station() and
+                                    time.monotonic() - session.rtl_last_requested >= 1.0):
+                                await self.record.system.action.return_to_launch()
+                                session.rtl_last_requested = time.monotonic()
                         age = time.monotonic() - session.last_input
                         if session.armed and session.status == "active" and age < .5:
                             await self._send_velocity(*session.latest_input)
@@ -642,6 +671,7 @@ class FlightController:
                                 await self.record.system.action.return_to_launch()
                                 session.status = "returning"
                                 session.armed = False
+                                session.rtl_last_requested = time.monotonic()
                 await asyncio.sleep(.05)
         except asyncio.CancelledError:
             raise
