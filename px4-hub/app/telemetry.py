@@ -22,6 +22,7 @@ STREAMS = {
     "armed": "armed", "flight_mode": "flight_mode", "position": "position",
     "velocity": "velocity_ned", "attitude": "attitude_euler", "battery": "battery",
     "gps": "gps_info", "health": "health", "status_text": "status_text",
+    "landed_state": "landed_state", "home": "home",
 }
 
 

@@ -61,3 +61,18 @@ class HubApi(ServiceApi):
     async def restart(self, instance_id): return await self.call("POST", f"/api/v1/instances/{instance_id}/restart")
     async def parameters(self, instance_id): return await self.call("GET", f"/api/v1/instances/{instance_id}/parameters/")
     async def patch_parameters(self, instance_id, body): return await self.call("PATCH", f"/api/v1/instances/{instance_id}/parameters/", json=body)
+    async def flight_state(self, instance_id): return await self.call("GET", f"/api/v1/instances/{instance_id}/flight")
+    async def flight_validate(self, instance_id, mission): return await self.call("POST", f"/api/v1/instances/{instance_id}/flight/missions/validate", json=mission)
+    async def flight_start_mission(self, instance_id, mission, request_id, generation):
+        del generation
+        return await self.call("POST", f"/api/v1/instances/{instance_id}/flight/missions", json={"mission": mission, "request_id": request_id})
+    async def flight_execution(self, instance_id, execution_id): return await self.call("GET", f"/api/v1/instances/{instance_id}/flight/executions/{execution_id}")
+    async def flight_cancel(self, instance_id, execution_id, request_id): return await self.call("POST", f"/api/v1/instances/{instance_id}/flight/executions/{execution_id}/cancel", json={"request_id": request_id})
+    async def flight_action(self, instance_id, action, body=None): return await self.call("POST", f"/api/v1/instances/{instance_id}/flight/{action}", json=body)
+    async def create_offboard(self, instance_id): return await self.call("POST", f"/api/v1/instances/{instance_id}/flight/offboard/sessions")
+    async def offboard_action(self, instance_id, session_id, action): return await self.call("POST", f"/api/v1/instances/{instance_id}/flight/offboard/sessions/{session_id}/{action}")
+    async def offboard_get(self, instance_id, session_id): return await self.call("GET", f"/api/v1/instances/{instance_id}/flight/offboard/sessions/{session_id}")
+    async def offboard_delete(self, instance_id, session_id): return await self.call("DELETE", f"/api/v1/instances/{instance_id}/flight/offboard/sessions/{session_id}")
+    def websocket_url(self, instance_id, session_id):
+        base = str(self.client.base_url).replace("https://", "wss://").replace("http://", "ws://")
+        return f"{base.rstrip('/')}/api/v1/instances/{instance_id}/flight/offboard/sessions/{session_id}/control"

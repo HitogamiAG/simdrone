@@ -2,7 +2,8 @@ FROM python:3.12.10-slim-bookworm
 ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 PIP_DISABLE_PIP_VERSION_CHECK=1
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl && \
     rm -rf /var/lib/apt/lists/* && \
-    groupadd --system backend && useradd --system --gid backend --home-dir /app backend
+    groupadd --system backend && useradd --system --gid backend --home-dir /app backend && \
+    mkdir -p /data && chown backend:backend /data
 WORKDIR /app
 COPY requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt

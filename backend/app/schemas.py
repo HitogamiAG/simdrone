@@ -95,3 +95,42 @@ class WorldPatch(BaseModel):
         if not -180 <= coords.get("longitude_deg", 0) <= 180:
             raise ValueError("longitude_deg out of range")
         return self
+
+
+class MissionWaypoint(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    x: float
+    y: float
+    z: float
+
+    @model_validator(mode="after")
+    def finite(self):
+        if not all(math.isfinite(v) for v in (self.x, self.y, self.z)):
+            raise ValueError("waypoint coordinates must be finite")
+        return self
+
+
+class MissionCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1, max_length=100)
+    world: str = Field(min_length=1, max_length=100)
+    waypoints: list[MissionWaypoint] = Field(min_length=1, max_length=500)
+    cruise_speed_m_s: float = Field(gt=0, le=3, allow_inf_nan=False)
+    takeoff_height_m: float = Field(gt=0, le=100, allow_inf_nan=False)
+    return_height_m: float = Field(gt=0, le=100, allow_inf_nan=False)
+
+
+class MissionUpdate(MissionCreate):
+    expected_revision: int = Field(ge=1)
+
+
+class MissionRun(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    mission_id: str
+    revision: int | None = Field(default=None, ge=1)
+    request_id: str = Field(min_length=1, max_length=128)
+
+
+class FlightRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    request_id: str = Field(min_length=1, max_length=128)

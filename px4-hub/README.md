@@ -39,6 +39,14 @@ curl -X POST http://localhost:8002/api/v1/instances/ \
 | WebSocket | `/api/v1/instances/{id}/logs` | Live stdout/stderr PX4 без истории |
 | WebSocket | `/api/v1/instances/{id}/telemetry` | Поток телеметрии |
 | GET | `/healthz` | Готовность процесса Hub, независимо от Gazebo |
+| GET | `/api/v1/instances/{id}/flight` | Flight state, наблюдаемые landed/armed и активный режим |
+| POST | `/api/v1/instances/{id}/flight/missions/validate` | Проверить world context, станцию и координатное преобразование |
+| POST / GET | `/api/v1/instances/{id}/flight/missions`, `/flight/executions/{execution_id}` | Загрузить mission plan в PX4 / получить прогресс |
+| POST | `/api/v1/instances/{id}/flight/executions/{execution_id}/cancel` | Запустить RTL и ждать подтверждения посадки |
+| POST | `/api/v1/instances/{id}/flight/{return,land}` | RTL или посадка в текущем месте |
+| POST / GET / DELETE | `/api/v1/instances/{id}/flight/offboard/sessions` | Создать, прочитать, закрыть эксклюзивную сессию |
+| POST / WS | `/api/v1/instances/{id}/flight/offboard/sessions/{session_id}/{arm,disarm,control}` | Offboard arm/disarm и ограниченный поток скоростей |
+| WS | `/api/v1/instances/{id}/flight/events` | Снимки активного flight state для Backend |
 
 Создание проверяет наличие модели `x500_gimbal` и работающего мира. PX4 instance numbers занимают свободные slots `0–2`; system ID равен slot + 1. MAVLink и gRPC endpoints каждому процессу выделяются из своих диапазонов. Одну Gazebo-модель нельзя привязать повторно.
 
@@ -52,7 +60,9 @@ PATCH параметров разрешает только `MPC_XY_VEL_MAX`, `MP
 
 Операции запуска, restart/stop/start/delete и чтение/изменение параметров сериализуются для каждого instance. Stop закрывает процессы и подписки, оставляя instance, слот и каталог параметров; Start использует тот же каталог. Отмена запуска освобождает процессы и слот; неуспешный restart сохраняет каталог и переводит instance в `failed`. WebSocket привязан к конкретному поколению подписок: restart/delete/stop закрывает прежний поток с кодом `1012`, даже если операция завершилась быстро. Отключение клиента освобождает подписку без ожидания следующего измерения. Независимый наблюдатель поколения отменяет зависшую отправку медленному клиенту.
 
-WebSocket публикует `armed`, `flight_mode`, `position`, `velocity`, `attitude`, `battery`, `gps`, `health` и `status_text` с временем получения. Клиенты имеют отдельные буферы: не более одного ожидающего сообщения каждого типа. Новое измерение заменяет прежнее того же типа, сохраняя порядок доставки типов; частая позиция не вытесняет health/status text. Медленный клиент не блокирует остальных. Для WS-протокола закреплён `websockets==15.0.1`. Flight commands, control и missions пока не реализованы; capabilities возвращают `false`.
+WebSocket телеметрии публикует `armed`, `flight_mode`, `position`, `velocity`, `attitude`, `battery`, `gps`, `health` и `status_text` с временем получения. Клиенты имеют отдельные буферы: не более одного ожидающего сообщения каждого типа. Новое измерение заменяет прежнее того же типа, сохраняя порядок доставки типов; частая позиция не вытесняет health/status text. Медленный клиент не блокирует остальных. Для WS-протокола закреплён `websockets==15.0.1`.
+
+FlightController принадлежит PX4 instance. Одновременно выполняется одна миссия или Offboard-сессия. Миссии преобразуются из локальных XYZ Gazebo в WGS84 по актуальному `spherical_coordinates`; отсутствие или смена привязки даёт `409`. Перед запуском сравниваются наблюдаемая позиция и PX4 home со станцией. Hub загружает в PX4 MissionRaw список `DO_CHANGE_SPEED`, waypoint с абсолютной высотой WGS84 и завершающий RTL item. `RTL_RETURN_ALT` временно задаёт высоту возврата относительно home и восстанавливается после подтверждённой посадки. Mission progress читается из MAVSDK, а окончание подтверждается telemetry `landed_state` и disarmed. Offboard использует MAVSDK `VelocityBodyYawspeed`; горизонтальная, вертикальная и yaw скорости ограничены MVP пределами и актуальными PX4 параметрами. Поток последнего ввода обслуживается с периодом 50 мс. Потеря ввода более 0,5 с задаёт нулевую скорость, 5 с запускает RTL; во время паузы мира управление приостанавливается и после resume инициируется RTL. Stop/restart/delete закрывают watchdog и execution tasks до остановки процессов. Ручные команды и missions включены в capabilities только для работающего PX4.
 
 ## Reset и ограничения
 
@@ -129,7 +139,7 @@ docker compose exec -T px4-hub python < px4-hub/tests/integration.py
 
 CPU — среднее за 5 секунд по cgroup, память — снимок cgroup, включая файловый кеш. Поддерживаются cgroup v1/v2. Замер включает Hub, PX4 и MAVSDK, но **не включает Gazebo/MediaMTX**; в мире во время замеров находились четыре модели для проверки лимита. Это наблюдение на текущем хосте, а не бюджет ресурсов всей платформы или нагрузочный тест. Между повторениями значения менялись.
 
-Остаются за пределами этого прогона: длительный нагрузочный тест, ресурсы всей Compose-платформы и повторная сборка без Docker-кеша. Отказы старта/restart проверены подменёнными адаптерами; реальные отказы проверены убийством уже запущенных процессов. Flight API, control и missions не реализованы.
+Остаются за пределами этого прогона: длительный нагрузочный тест, ресурсы всей Compose-платформы и повторная сборка без Docker-кеша. Отказы старта/restart проверены подменёнными адаптерами; реальные отказы проверены убийством уже запущенных процессов. Flight API, ручное управление и missions реализованы, но отдельные сквозные полёты для этих режимов ещё не подтверждены настоящим PX4/Gazebo.
 
 ## Сборка образа и доступ к GitHub
 

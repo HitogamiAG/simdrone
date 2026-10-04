@@ -71,6 +71,9 @@ services:
       BACKEND_REQUEST_TIMEOUT: ${BACKEND_REQUEST_TIMEOUT:-30}
       BACKEND_STARTUP_TIMEOUT: ${BACKEND_STARTUP_TIMEOUT:-120}
       BACKEND_MAX_SUBSCRIPTIONS: ${BACKEND_MAX_SUBSCRIPTIONS:-32}
+      MISSION_DB: /data/missions.sqlite3
+    volumes:
+      - backend-missions:/data
     ports:
       - "${BACKEND_PORT:-8003}:8003"
     depends_on:
@@ -117,3 +120,6 @@ networks:
   default:
     name: uav-simulation
     driver: bridge
+
+volumes:
+  backend-missions:

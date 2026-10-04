@@ -118,13 +118,14 @@ class Realtime:
             base = self.platform.settings.gazebo_url.replace("http://", "ws://").replace("https://", "wss://")
             return await connect(base + "/api/v1/world/logs", open_timeout=5), None
         parts = channel.split(".")
-        if len(parts) == 3 and parts[0] == "drone" and parts[2] in {"telemetry", "logs"}:
+        if len(parts) == 3 and parts[0] == "drone" and parts[2] in {"telemetry", "logs", "flight"}:
             item = self.platform._record(parts[1])
             if item.status in {"creating", "resetting", "deleting"}:
                 raise ValueError("drone operation in progress")
             if not item.instance_id: raise ValueError("autopilot is stopped")
             base = self.platform.settings.hub_url.replace("http://", "ws://").replace("https://", "wss://")
-            path = f"/api/v1/instances/{quote(item.instance_id)}/{parts[2]}"
+            path = (f"/api/v1/instances/{quote(item.instance_id)}/flight/events" if parts[2] == "flight"
+                    else f"/api/v1/instances/{quote(item.instance_id)}/{parts[2]}")
             return await connect(base + path, open_timeout=5), item
         if len(parts) == 4 and parts[0] == "drone" and parts[2] == "sensor":
             item = self.platform._record(parts[1])

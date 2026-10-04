@@ -10,6 +10,7 @@ from .config import Settings
 from .errors import BackendError, error_response
 from .realtime import Realtime
 from .service import Platform
+from .flight import FlightPlatform
 
 
 def create_app(settings=None, platform_factory=None):
@@ -20,6 +21,7 @@ def create_app(settings=None, platform_factory=None):
     async def lifespan(app):
         platform = factory(config)
         app.state.platform = platform
+        app.state.flight = FlightPlatform(platform)
         app.state.realtime = Realtime(platform)
         platform.realtime = app.state.realtime
         platform.startup_world_check = await platform.ready()
@@ -27,6 +29,7 @@ def create_app(settings=None, platform_factory=None):
             yield
         finally:
             await app.state.realtime.close()
+            app.state.flight.close()
             await platform.close()
 
     app = FastAPI(title="UAV Platform Backend", version="0.1.0", lifespan=lifespan)

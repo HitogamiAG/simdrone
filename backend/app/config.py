@@ -13,3 +13,4 @@ class Settings:
     request_timeout: float = float(os.getenv("BACKEND_REQUEST_TIMEOUT", "30"))
     startup_timeout: float = float(os.getenv("BACKEND_STARTUP_TIMEOUT", "120"))
     max_subscriptions: int = int(os.getenv("BACKEND_MAX_SUBSCRIPTIONS", "32"))
+    mission_db: str = os.getenv("MISSION_DB", "/data/missions.sqlite3")

@@ -1,9 +1,143 @@
 import asyncio
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from .errors import BackendError
-from .schemas import DroneCreate, ParameterPatch, SensorPatch, WorldPatch
+from .schemas import (DroneCreate, ParameterPatch, SensorPatch, WorldPatch,
+                      MissionCreate, MissionUpdate, MissionRun, FlightRequest)
 
 router = APIRouter()
+
+
+@router.get("/api/v1/missions/")
+async def list_missions(request: Request, world: str | None = None):
+    return await asyncio.to_thread(request.app.state.flight.store.list, world)
+
+
+@router.post("/api/v1/missions/", status_code=201)
+async def create_mission(body: MissionCreate, request: Request):
+    return await request.app.state.flight.create_mission(body.model_dump())
+
+
+@router.get("/api/v1/missions/{mission_id}/")
+async def get_mission(mission_id: str, request: Request):
+    mission = await asyncio.to_thread(request.app.state.flight.store.get, mission_id)
+    if mission is None: raise BackendError(404, "mission_not_found", "Mission was not found")
+    return mission
+
+
+@router.put("/api/v1/missions/{mission_id}/")
+async def update_mission(mission_id: str, body: MissionUpdate, request: Request):
+    return await request.app.state.flight.update_mission(mission_id, body.model_dump())
+
+
+@router.delete("/api/v1/missions/{mission_id}/")
+async def delete_mission(mission_id: str, request: Request):
+    deleted = await asyncio.to_thread(request.app.state.flight.store.delete, mission_id)
+    if not deleted: raise BackendError(404, "mission_not_found", "Mission was not found")
+    return {"deleted": True, "id": mission_id}
+
+
+@router.post("/api/v1/missions/{mission_id}/validate")
+async def validate_mission(mission_id: str, request: Request, drone_id: str, revision: int | None = None):
+    return await request.app.state.flight.validate_mission(mission_id, drone_id, revision)
+
+
+@router.get("/api/v1/drones/{drone_id}/flight")
+async def flight_status(drone_id: str, request: Request):
+    return await request.app.state.flight.flight_status(drone_id)
+
+
+@router.post("/api/v1/drones/{drone_id}/flight/missions", status_code=202)
+async def flight_start_mission(drone_id: str, body: MissionRun, request: Request):
+    return await request.app.state.flight.start_mission(drone_id, body.model_dump())
+
+
+@router.get("/api/v1/drones/{drone_id}/flight/executions/{execution_id}")
+async def flight_execution(drone_id: str, execution_id: str, request: Request):
+    return await request.app.state.flight.execution(drone_id, execution_id)
+
+
+@router.post("/api/v1/drones/{drone_id}/flight/executions/{execution_id}/cancel", status_code=202)
+async def flight_cancel(drone_id: str, execution_id: str, body: FlightRequest, request: Request):
+    async with request.app.state.platform.lock:
+        return await request.app.state.flight.cancel(drone_id, execution_id, body.request_id)
+
+
+@router.post("/api/v1/drones/{drone_id}/flight/{action}", status_code=202)
+async def flight_action(drone_id: str, action: str, body: FlightRequest, request: Request):
+    if action not in {"return", "land"}: raise BackendError(404, "route_not_found", "Unknown flight action")
+    async with request.app.state.platform.lock:
+        drone = request.app.state.platform._record(drone_id)
+        if not drone.instance_id: raise BackendError(409, "autopilot_not_running", "Drone has no PX4 instance")
+        return await request.app.state.platform.hub.flight_action(drone.instance_id, action, body.model_dump())
+
+
+@router.post("/api/v1/drones/{drone_id}/flight/offboard/sessions", status_code=201)
+async def offboard_create(drone_id: str, request: Request):
+    async with request.app.state.platform.lock:
+        drone = request.app.state.platform._record(drone_id)
+        if not drone.instance_id: raise BackendError(409, "autopilot_not_running", "Drone has no PX4 instance")
+        return await request.app.state.platform.hub.create_offboard(drone.instance_id)
+
+
+@router.get("/api/v1/drones/{drone_id}/flight/offboard/sessions/{session_id}")
+async def offboard_get(drone_id: str, session_id: str, request: Request):
+    drone = request.app.state.platform._record(drone_id)
+    if not drone.instance_id: raise BackendError(409, "autopilot_not_running", "Drone has no PX4 instance")
+    return await request.app.state.platform.hub.offboard_get(drone.instance_id, session_id)
+
+
+@router.post("/api/v1/drones/{drone_id}/flight/offboard/sessions/{session_id}/{action}", status_code=202)
+async def offboard_action(drone_id: str, session_id: str, action: str, request: Request):
+    if action not in {"arm", "disarm"}: raise BackendError(404, "route_not_found", "Unknown offboard action")
+    async with request.app.state.platform.lock:
+        drone = request.app.state.platform._record(drone_id)
+        if not drone.instance_id: raise BackendError(409, "autopilot_not_running", "Drone has no PX4 instance")
+        return await request.app.state.platform.hub.offboard_action(drone.instance_id, session_id, action)
+
+
+@router.delete("/api/v1/drones/{drone_id}/flight/offboard/sessions/{session_id}", status_code=202)
+async def offboard_delete(drone_id: str, session_id: str, request: Request):
+    async with request.app.state.platform.lock:
+        drone = request.app.state.platform._record(drone_id)
+        if not drone.instance_id: raise BackendError(409, "autopilot_not_running", "Drone has no PX4 instance")
+        return await request.app.state.platform.hub.offboard_delete(drone.instance_id, session_id)
+
+
+@router.websocket("/api/v1/drones/{drone_id}/flight/offboard/sessions/{session_id}/control")
+async def offboard_control(drone_id: str, session_id: str, websocket: WebSocket):
+    import json
+    from websockets.asyncio.client import connect
+    platform = websocket.app.state.platform
+    drone = platform.drones.get(drone_id)
+    if not drone or not drone.instance_id:
+        await websocket.close(code=1008, reason="drone is unavailable")
+        return
+    try:
+        await websocket.accept()
+        async with connect(platform.hub.websocket_url(drone.instance_id, session_id),
+                          open_timeout=5, close_timeout=2, max_size=16384) as upstream:
+            first = await websocket.receive_json()
+            await upstream.send(json.dumps(first))
+            async def client_to_hub():
+                while True:
+                    message = await websocket.receive_json()
+                    await upstream.send(json.dumps(message))
+            async def hub_to_client():
+                async for message in upstream:
+                    await websocket.send_text(message)
+            tasks = [asyncio.create_task(client_to_hub()), asyncio.create_task(hub_to_client())]
+            try:
+                done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                for task in pending: task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+                for task in done: task.result()
+            finally:
+                for task in tasks:
+                    if not task.done(): task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+    except Exception:
+        try: await websocket.close(code=1011, reason="flight control connection ended")
+        except Exception: pass
 
 
 @router.get("/healthz")

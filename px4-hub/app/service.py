@@ -33,6 +33,8 @@ class Instance:
     operation_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     udp_port: int = field(init=False)
     grpc_port: int = field(init=False)
+    station_pose: dict | None = None
+    flight: object | None = None
 
     def __post_init__(self):
         self.udp_port = 14540 + self.slot
@@ -125,6 +127,7 @@ class InstanceService:
             instance_id = str(uuid.uuid4())
             workdir = self.settings.instance_dir / instance_id
             record = Instance(instance_id, drone_id, drone["name"], drone.get("entity_id"), slot, self.world_name, workdir)
+            record.station_pose = drone.get("pose")
             self.instances[instance_id] = record
         async with record.operation_lock:
             try:
@@ -159,6 +162,8 @@ class InstanceService:
             # MAVSDK cannot read parameters, restart must leave the live pair
             # monitored and the record in its original running state.
             await self._capture_parameters(record)
+            if record.flight:
+                await record.flight.close()
             record.status = "restarting"
             if record.monitor:
                 record.monitor.cancel()
@@ -183,6 +188,8 @@ class InstanceService:
                 raise HubError(404, "instance_not_found", "PX4 instance does not exist")
             if record.status == "stopped":
                 return self.serialize(record)
+            if record.flight:
+                await record.flight.close()
             if record.monitor:
                 record.monitor.cancel()
                 await asyncio.gather(record.monitor, return_exceptions=True)
@@ -215,6 +222,8 @@ class InstanceService:
             if self.instances.get(instance_id) is not record:
                 raise HubError(404, "instance_not_found", "PX4 instance does not exist")
             record.status = "stopping"
+            if record.flight:
+                await record.flight.close()
             if record.monitor:
                 record.monitor.cancel()
                 await asyncio.gather(record.monitor, return_exceptions=True)
@@ -307,7 +316,48 @@ class InstanceService:
             await self.px4.stop(record)
             raise
         record.status = "running"
+        from .flight import FlightController
+        record.flight = FlightController(self, record)
         record.monitor = asyncio.create_task(self._watch(record))
+
+    def _flight(self, instance_id):
+        record = self._get_running(instance_id)
+        if record.flight is None:
+            from .flight import FlightController
+            record.flight = FlightController(self, record)
+        return record.flight
+
+    async def flight_state(self, instance_id):
+        return self._flight(instance_id).state()
+
+    async def flight_validate(self, instance_id, mission):
+        return await self._flight(instance_id).validate_mission(mission)
+
+    async def flight_start_mission(self, instance_id, mission, request_id):
+        return await self._flight(instance_id).start_mission(mission, request_id)
+
+    async def flight_execution(self, instance_id, execution_id):
+        return self._flight(instance_id).execution(execution_id)
+
+    async def flight_cancel(self, instance_id, execution_id, request_id):
+        del request_id
+        return await self._flight(instance_id).cancel(execution_id)
+
+    async def flight_action(self, instance_id, action, request_id):
+        return await self._flight(instance_id).action(action, request_id)
+
+    async def flight_create_session(self, instance_id):
+        return await self._flight(instance_id).create_session()
+
+    async def flight_session(self, instance_id, session_id):
+        flight = self._flight(instance_id)
+        return flight.session_public(flight._session(session_id))
+
+    async def flight_session_action(self, instance_id, session_id, action):
+        return await self._flight(instance_id).session_action(session_id, action)
+
+    async def flight_delete_session(self, instance_id, session_id):
+        return await self._flight(instance_id).delete_session(session_id)
 
     async def _watch(self, record):
         waits = [asyncio.create_task(record.px4_process.wait()), asyncio.create_task(record.mavsdk_process.wait())]
@@ -327,6 +377,8 @@ class InstanceService:
 
     async def _dispose(self, record, remove_dir):
         record.status = "stopping"
+        if record.flight:
+            await record.flight.close()
         if record.monitor and record.monitor is not asyncio.current_task():
             record.monitor.cancel()
             await asyncio.gather(record.monitor, return_exceptions=True)
@@ -364,6 +416,7 @@ class InstanceService:
             "dependencies": {"gazebo_available": self.gazebo_available,
                              "simulation_paused": self.simulation_paused},
             "last_error": record.last_error,
-            "capabilities": {"parameters": True, "telemetry": True, "flight": False,
-                             "missions": False, "control": False},
+            "capabilities": {"parameters": True, "telemetry": True, "flight": True,
+                             "missions": True, "control": True},
+            "flight": record.flight.state() if record.flight else {"active": None, "ready": False},
         }

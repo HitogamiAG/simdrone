@@ -128,7 +128,8 @@ class Platform:
                                             "error": autopilot_error},
                 "binding": {"valid": bool(gazebo and item.gazebo_id),
                             "generation": item.generation},
-                "capabilities": {"flight_control": False, "missions": False, "manual_control": False},
+                "flight": (autopilot or {}).get("flight", {"active": None, "ready": False}),
+                "capabilities": {"flight_control": True, "missions": True, "manual_control": True},
                 "last_error": item.last_error}
 
     async def list_drones(self):

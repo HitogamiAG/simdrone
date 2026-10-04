@@ -12,7 +12,7 @@ docker compose up --build
 
 Backend доступен на `http://localhost:8003`; OpenAPI — `/docs`, healthcheck приложения — `/healthz`. Все процессы и тесты платформы работают в Docker; для Backend не требуется Gazebo на хосте. Контейнер запускает один Uvicorn worker, непривилегированного пользователя и `init`.
 
-Backend использует `GAZEBO_API_URL`, `PX4_HUB_API_URL`, `MEDIAMTX_API_URL`, `MEDIAMTX_WHEP_URL`, `BACKEND_REQUEST_TIMEOUT`, `BACKEND_STARTUP_TIMEOUT` и `BACKEND_MAX_SUBSCRIPTIONS`. Порты, origin браузера и ICE hostnames MediaMTX заданы в корневом [`.env.example`](../.env.example). `WEBRTC_IPS_FROM_INTERFACES=no` заставляет MediaMTX объявлять только настроенные hostnames; `WEBRTC_ADDITIONAL_HOSTS` должен содержать адрес, разрешимый и доступный браузеру. Прямой WebRTC рассчитан на доступные друг другу сети и не включает TURN.
+Backend использует `GAZEBO_API_URL`, `PX4_HUB_API_URL`, `MEDIAMTX_API_URL`, `MEDIAMTX_WHEP_URL`, `BACKEND_REQUEST_TIMEOUT`, `BACKEND_STARTUP_TIMEOUT`, `BACKEND_MAX_SUBSCRIPTIONS` и `MISSION_DB`. Порты, origin браузера и ICE hostnames MediaMTX заданы в корневом [`.env.example`](../.env.example). `WEBRTC_IPS_FROM_INTERFACES=no` заставляет MediaMTX объявлять только настроенные hostnames; `WEBRTC_ADDITIONAL_HOSTS` должен содержать адрес, разрешимый и доступный браузеру. Прямой WebRTC рассчитан на доступные друг другу сети и не включает TURN.
 
 ## API
 
@@ -33,12 +33,22 @@ Backend использует `GAZEBO_API_URL`, `PX4_HUB_API_URL`, `MEDIAMTX_API_
 | GET | `/api/v1/drones/{id}/sensors/{sensor}/video` | WHEP URL и состояние камеры |
 | POST | `/api/v1/drones/{id}/sensors/{sensor}/{activate,deactivate}` | Управление публикацией камеры |
 | WS | `/api/v1/realtime` | Общий поток с командами `subscribe` / `unsubscribe` |
+| CRUD | `/api/v1/missions/` | Определения миссий и optimistic revision updates в SQLite |
+| POST | `/api/v1/missions/{id}/validate` | Проверить маршрут для дрона и текущего PX4 instance |
+| GET / POST | `/api/v1/drones/{id}/flight` | Состояние полёта / запуск миссии |
+| GET / POST | `/api/v1/drones/{id}/flight/executions/{execution_id}` | Прогресс / отмена с возвратом на станцию |
+| POST | `/api/v1/drones/{id}/flight/{return,land}` | RTL или посадка в текущем месте |
+| POST / GET / DELETE | `/api/v1/drones/{id}/flight/offboard/sessions` | Резервирование и завершение управления джойстиком |
+| POST | `/api/v1/drones/{id}/flight/offboard/sessions/{session_id}/{arm,disarm}` | Включение Offboard на земле / disarm после посадки |
+| WS | `/api/v1/drones/{id}/flight/offboard/sessions/{session_id}/control` | Ввод джойстика с token и возрастающим `seq` |
 
 Создание принимает `model: "x500_gimbal"`, необязательные `name` и `pose`; успешный ответ выдаётся после подключения PX4 и позиционной телеметрии. Поза задаётся только при создании. PATCH PX4 разрешает `MPC_XY_VEL_MAX`, `MPC_Z_VEL_MAX_UP`, `MPC_Z_VEL_MAX_DN`. PATCH сенсора сначала валидируется, затем выполняет полный drone-reset; PX4 запускается только после применения частоты. Изменение мира объединяет переданные поля с текущими значениями, удаляет все дроны через world-reset и применяет настройки. Следующий world-reset/reboot возвращает исходный SDF.
 
 World-reset/reboot не создаёт runtime-дроны снова: Backend и Hub реестры очищаются, прежние публичные ID отвечают `404`. Успешный reset повторно проверяет мир, поэтому после перезапуска Backend, обнаружившего оставшиеся runtime-модели, можно создать дроны после явной очистки мира. Drone-reset сохраняет публичный ID и намерение запуска PX4; параметры PX4 сбрасываются к defaults. Stop/start/restart PX4 сохраняют подтверждённые значения параметров. Изменение PX4 и создание/restart дрона на паузе возвращает `409 simulation_paused`. Удаление и сброс мира разрешены на паузе; мир возвращается к режиму исходного SDF. Все изменения мира/сенсоров/дронов относятся к последовательности внешних вызовов, а не транзакции; при неполном отказе запись остаётся `failed` с этапом и известными ресурсами. GET дрона и списка сохраняют доступ к такой записи и показывают ошибки Gazebo/PX4 отдельно; при недоступном Gazebo актуальная поза возвращается `null`.
 
-Ошибки имеют вид `{"error":{"code":"...","message":"...","details":...}}`; ошибки схемы также сериализуются в этот формат и возвращают `422`. При создании Backend заранее проверяет занятость имени. Если ответ Gazebo потерян, Backend ищет созданную модель по уникальному имени и удаляет её только после подтверждения, что PX4 instance отсутствует или удалён. При неизвестном состоянии PX4 модель сохраняется для безопасного согласования. `capabilities.flight_control`, `manual_control` и `missions` пока `false`. API не реализует missions, control, загрузку SDF и произвольные модели.
+Ошибки имеют вид `{"error":{"code":"...","message":"...","details":...}}`; ошибки схемы также сериализуются в этот формат и возвращают `422`. При создании Backend заранее проверяет занятость имени. Если ответ Gazebo потерян, Backend ищет созданную модель по уникальному имени и удаляет её только после подтверждения, что PX4 instance отсутствует или удалён. При неизвестном состоянии PX4 модель сохраняется для безопасного согласования. Mission definitions сохраняются в SQLite (`MISSION_DB`, по умолчанию `/data/missions.sqlite3`) на Compose volume `backend-missions`; запуски и их история остаются в памяти. Миссия привязана к имени мира и снимку его `spherical_coordinates`; Hub повторно проверяет их перед стартом. Маршрут задаётся точками XYZ Gazebo в метрах, общей скоростью и высотами взлёта/возврата. Обход препятствий и точная посадка по метке отсутствуют.
+
+Миссия выполняется в PX4 независимо от браузера. Отмена переводит её в RTL; успех подтверждается только после наблюдаемых посадки и disarm. Offboard доступен одному управляющему WS-клиенту; token выдаётся при создании сессии и передаётся первым сообщением. Оси ввода — нормализованные `forward/right/up/yaw`, команды задают скорость. Hub обнуляет скорости после 0,5 с без свежего ввода и запускает RTL после 5 с. Входящий ввод подтверждает приём команды, но не физическое движение. Сессия создаётся без arm; браузер сначала подключает WS, затем явно вызывает arm. `capabilities.flight_control`, `manual_control` и `missions` включены для поддерживаемого PX4 instance.
 
 ## Realtime и видео
 
