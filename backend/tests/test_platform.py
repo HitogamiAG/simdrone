@@ -277,3 +277,23 @@ def test_realtime_mailbox_keeps_latest_sample_per_type_and_clear_invalidates_old
     queue.clear()
     queue.put_nowait({"type": "invalidated"})
     assert queue.get_nowait() == {"type": "invalidated"}
+
+
+def test_autopilot_restart_invalidates_realtime_before_closing_hub_stream():
+    async def run():
+        p = platform()
+        drone = await p.create_drone(DroneCreate(name="stream-owner"))
+        events = []
+        class Realtime:
+            async def invalidate_drone(self, drone_id):
+                events.append(("invalidate", drone_id))
+        p.realtime = Realtime()
+        restart = p.hub.restart
+        async def tracked_restart(instance_id):
+            events.append(("restart", instance_id))
+            return await restart(instance_id)
+        p.hub.restart = tracked_restart
+        await p.autopilot_action(drone["id"], "restart")
+        assert events == [("invalidate", drone["id"]), ("restart", drone["autopilot"]["id"])]
+        assert p.drones[drone["id"]].status == "ready"
+    asyncio.run(run())

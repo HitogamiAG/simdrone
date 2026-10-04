@@ -166,6 +166,8 @@ async def realtime_socket(ws: WebSocket):
                     await ws.send_json(payload)
                     await _drop(realtime, subscriptions, channel)
                 else:
+                    if payload.get("type") == "gap":
+                        payload = {**payload, "channel": channel}
                     await ws.send_json(payload)
     except (WebSocketDisconnect, asyncio.CancelledError):
         pass

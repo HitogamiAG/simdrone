@@ -68,15 +68,17 @@ class LiveLogs:
                 for queue in self.queues:
                     queue.put_nowait(message)
 
-    def close(self):
+    def close(self, discard=True):
         with self.lock:
             if self.closed:
                 return
             self.closed = True
             for queue in self.queues:
-                queue.clear()
+                if discard:
+                    queue.clear()
                 queue.put_nowait(None)
-            self.queues.clear()
+            if discard:
+                self.queues.clear()
 
 
 class LineDecoder:
@@ -117,14 +119,24 @@ async def serve_logs(websocket, logs):
     async def ended():
         while not logs.closed:
             await asyncio.sleep(.05)
-    tasks = [asyncio.create_task(send()), asyncio.create_task(disconnect()), asyncio.create_task(ended())]
+        # Give a fast subscriber time to receive final fatal output at EOF.
+        # A blocked sender is still cancelled after this bounded grace period.
+        await asyncio.sleep(.25)
+    sender = asyncio.create_task(send())
+    receiver = asyncio.create_task(disconnect())
+    monitor = asyncio.create_task(ended())
+    tasks = [sender, receiver, monitor]
     try:
-        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        close_socket = logs.closed and receiver not in done
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-        if logs.closed:
-            await websocket.close(code=1012, reason="process log stream ended")
+        if close_socket:
+            try:
+                await websocket.close(code=1012, reason="process log stream ended")
+            except (RuntimeError, WebSocketDisconnect):
+                pass
     except WebSocketDisconnect:
         pass
     finally:

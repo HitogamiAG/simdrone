@@ -80,3 +80,47 @@ def test_socket_cleanup_cancels_slow_sender_on_process_exit():
         assert socket.code == 1012
         assert not logs.queues
     asyncio.run(run())
+
+
+def test_final_error_delivered_before_natural_eof():
+    from app.live_logs import serve_logs
+    class Socket:
+        def __init__(self): self.messages = []; self.code = None
+        async def accept(self): pass
+        async def send_json(self, message): self.messages.append(message)
+        async def receive(self): return await asyncio.Future()
+        async def close(self, code, reason): self.code = code
+    async def run():
+        logs, socket = LiveLogs("px4"), Socket()
+        task = asyncio.create_task(serve_logs(socket, logs))
+        await asyncio.sleep(.03)
+        logs.publish(b"fatal startup error")
+        logs.close(discard=False)
+        logs.close()  # monitor cleanup must not erase output already queued at EOF
+        await asyncio.wait_for(task, 1)
+        assert [value["message"] for value in socket.messages] == ["fatal startup error"]
+        assert socket.code == 1012
+        assert not logs.queues
+    asyncio.run(run())
+
+
+def test_peer_disconnect_wins_race_with_process_exit():
+    from app.live_logs import serve_logs
+    class Socket:
+        def __init__(self): self.release = asyncio.Event(); self.close_calls = 0
+        async def accept(self): pass
+        async def send_json(self, message): await asyncio.Future()
+        async def receive(self):
+            await self.release.wait()
+            return {"type": "websocket.disconnect"}
+        async def close(self, code, reason): self.close_calls += 1
+    async def run():
+        logs, socket = LiveLogs("px4"), Socket()
+        task = asyncio.create_task(serve_logs(socket, logs))
+        await asyncio.sleep(.03)
+        logs.close()
+        socket.release.set()
+        await asyncio.wait_for(task, 1)
+        assert socket.close_calls == 0
+        assert not logs.queues
+    asyncio.run(run())

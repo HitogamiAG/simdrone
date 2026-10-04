@@ -44,7 +44,7 @@ class GazeboProcess:
             decoder.finish()
         finally:
             process.stdout.close()
-            logs.close()
+            logs.close(discard=False)
 
     def alive(self):
         return self.process is not None and self.process.poll() is None

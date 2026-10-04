@@ -61,7 +61,7 @@ class Px4Adapter:
                     decoder.feed(chunk)
                 decoder.finish()
         finally:
-            logs.close()
+            logs.close(discard=False)
 
     async def stop(self, record):
         if record.telemetry:

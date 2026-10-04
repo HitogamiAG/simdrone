@@ -84,3 +84,30 @@ docker run --rm --network uav-simulation uav-webrtc-browser:test
 В Docker прошли Backend contract tests (**13 passed**), Hub tests (**21 passed**), реальная интеграция Backend с двумя PX4, realtime-интеграция, Gazebo `regression.py` и `smoke.py`, а также браузерный WebRTC-тест с декодированием кадра 1280×720 и двумя зрителями. `docker compose config --quiet` прошёл. Backend contract suite проверяет reconciliation после потерянного ответа, сериализацию camera actions, ошибки Pydantic и доступность failed-записей. Hub suite проверяет сохранение monitor при отказе parameter snapshot.
 
 Backend не восстанавливает соответствия после собственного рестарта и не усыновляет найденные Hub/Gazebo ресурсы; `/system/status` показывает неучтённые модели и instances. Явный world-reset удаляет все Hub instances перед перезагрузкой Gazebo; при отказе удаления Gazebo не перезапускается. Автоматического rollback внешних вызовов и автоматического восстановления сервисов нет.
+
+## Live-логи для UI
+
+Подписка через существующий `WS /api/v1/realtime`:
+
+```json
+{"action":"subscribe","channels":["world.logs","drone.PUBLIC_ID.logs"]}
+```
+
+`world.logs` — объединённые stdout/stderr Gazebo Server; `drone.PUBLIC_ID.logs` — stdout/stderr PX4 соответствующего instance. MAVSDK, ULog и события действий Backend не входят в поток. UI самостоятельно добавляет записи пользовательских действий и их результатов. Новый подписчик получает только новые сообщения, история и replay отсутствуют.
+
+Формат соответствует realtime: `channel`, `type: "log"`, публичный `drone_id` (для мира — null), UTC `received_at` Backend, `world_generation`, `runtime_generation`, `data`. В `data` находятся `source`, исходное UTC-время получения сервисом и `message`; время симуляции и severity не выводятся из текста. Пауза мира не прекращает чтение вывода процессов.
+
+Backend открывает один upstream WebSocket на канал для всех зрителей. Для логов используется отдельная FIFO-очередь до 128 записей на клиента, вместо mailbox телеметрии с заменой последних значений. Переполнение удаляет старые записи и выдаёт `{"type":"gap","channel":"...","dropped":N}`. Upstream также ограничивает очередь: его сообщение `gap` передаётся в realtime с количеством пропущенных строк в `data`. Число подписок ограничивается существующим `BACKEND_MAX_SUBSCRIPTIONS`.
+
+Stop/restart/reset/delete, падение процесса и reboot завершают прежний поток; приходит `invalidated`, клиент подписывается повторно после запуска. Смена поколения очищает ожидающие записи. Логи не возвращаются через HTTP и не накапливаются без клиентов. Для дрона подписка возможна после назначения Hub instance; первоначальный POST создания синхронный, поэтому ранний вывод старта до получения публичного ID в UI недоступен. Внутренние диагностические файлы сервисов сохраняют прежнее поведение.
+
+### Проверка live-логов, 04.10.2026
+
+Добавлены unit-тесты bounded FIFO, пропуска старых строк при backpressure, отсутствия replay, общей upstream-подписки, инвалидирования до перезапуска upstream, гонки закрытия WebSocket и сохранения последней fatal-строки при естественном завершении процесса. `tests/live_logs_integration.py` запускается в Docker на Compose-сети и проверяет реальные сообщения Gazebo/PX4 с двумя зрителями, паузу, stop/start/restart/delete дрона, world-reset и reboot. Все изменяющие мир интеграционные скрипты запускаются последовательно.
+
+```sh
+docker run --rm --network none -v "$PWD/backend:/work:ro" -w /work -e PYTHONPATH=/work --entrypoint pytest uav-platform-backend:local -q -p no:cacheprovider tests/test_platform.py tests/test_live_logs.py
+docker run --rm --network uav-simulation -v "$PWD/backend/tests:/tests:ro" -w /tests --entrypoint python uav-platform-backend:local live_logs_integration.py
+```
+
+Проверка 04.10.2026: Backend unit tests **16 passed**, Gazebo contract/live-log tests **20 passed**, Hub tests **27 passed**. Сквозной `live_logs_integration.py` получил настоящие строки Gazebo и PX4 двумя клиентами, проверил pause, stop/start/restart/delete, world-reset и reboot. Также прошли Backend integration (два дрона, параметры, sensor reset, pause и world reset), realtime integration (общие клиенты и медленный читатель), Gazebo `regression.py`, Gazebo `smoke.py` и `docker compose config --quiet`. Исправлен порядок закрытия: Backend инвалидирует upstream до команд PX4/reset, чтобы зритель получил `invalidated`, а не ошибку закрывшегося сокета.

@@ -259,10 +259,10 @@ class Platform:
             self.operation, item.status = "drone_reset", "resetting"
             wanted = item.autopilot_wanted
             try:
+                await self._invalidate(item)
                 if item.instance_id:
                     await self.hub.delete(item.instance_id)
                     item.instance_id = None
-                await self._invalidate(item)
                 gazebo = await self.gazebo.reset_drone(item.gazebo_id)
                 item.generation += 1
                 if wanted:
@@ -298,25 +298,33 @@ class Platform:
         async with self.lock:
             item = self._record(drone_id)
             if action in {"start", "restart"}: await self._running()
-            if action == "start" and item.instance_id:
-                response = await self.hub.start(item.instance_id)
-            elif action == "stop" and item.instance_id:
-                response = await self.hub.stop(item.instance_id)
-            elif action == "restart" and item.instance_id:
-                response = await self.hub.restart(item.instance_id)
-            elif action == "stop":
+            if action == "stop" and not item.instance_id:
                 return {"status": "stopped", "id": drone_id}
-            elif action == "start":
-                response = await self.hub.create(item.gazebo_id)
-                item.instance_id = response["id"]
-            elif action == "restart":
-                response = await self.hub.create(item.gazebo_id)
-                item.instance_id = response["id"]
-            item.autopilot_wanted = action != "stop"
-            item.generation += 1
-            await self._invalidate(item)
-            item.status = "ready"
-            return response
+            self.operation, item.status = f"autopilot_{action}", "resetting"
+            try:
+                if item.instance_id:
+                    # Detach client streams before Hub closes its upstream socket.
+                    item.generation += 1
+                    await self._invalidate(item)
+                if action == "start" and item.instance_id:
+                    response = await self.hub.start(item.instance_id)
+                elif action == "stop":
+                    response = await self.hub.stop(item.instance_id)
+                elif action == "restart" and item.instance_id:
+                    response = await self.hub.restart(item.instance_id)
+                else:
+                    response = await self.hub.create(item.gazebo_id)
+                    item.instance_id = response["id"]
+                    item.generation += 1
+                item.autopilot_wanted = action != "stop"
+                item.status = "ready"
+                return response
+            except Exception as exc:
+                item.status = "failed"
+                item.last_error = {"stage": f"autopilot_{action}", "message": str(exc)}
+                raise
+            finally:
+                self.operation = None
 
     async def parameters(self, drone_id):
         item = self._record(drone_id)
@@ -344,10 +352,10 @@ class Platform:
             self.operation, item.status = "sensor_patch", "resetting"
             wanted = item.autopilot_wanted
             try:
+                await self._invalidate(item)
                 if item.instance_id:
                     await self.hub.delete(item.instance_id)
                     item.instance_id = None
-                await self._invalidate(item)
                 await self.gazebo.reset_drone(item.gazebo_id)
                 await self.gazebo.patch_sensor(item.gazebo_id, sensor_id, body)
                 item.generation += 1
@@ -370,10 +378,10 @@ class Platform:
             self.operation, item.status = "sensor_reset", "resetting"
             wanted = item.autopilot_wanted
             try:
+                await self._invalidate(item)
                 if item.instance_id:
                     await self.hub.delete(item.instance_id)
                     item.instance_id = None
-                await self._invalidate(item)
                 await self.gazebo.reset_drone(item.gazebo_id)
                 item.generation += 1
                 if wanted:
@@ -442,8 +450,8 @@ class Platform:
 
     async def _reset_world(self, reboot=False):
         try:
-            await self._stop_all_instances()
             if getattr(self, "realtime", None): await self.realtime.invalidate_all()
+            await self._stop_all_instances()
             result = await (self.gazebo.reboot() if reboot else self.gazebo.world_reset())
             remaining = await self.gazebo.drones()
             if remaining:

@@ -3,6 +3,7 @@ import json
 from datetime import datetime, timezone
 from urllib.parse import quote
 from websockets.asyncio.client import connect
+from .log_mailbox import LogMailbox
 
 
 class LatestByType:
@@ -54,8 +55,8 @@ class Realtime:
                 upstream, resource = await self._upstream(channel)
                 task = asyncio.create_task(self._pump(channel, upstream, resource))
                 entry = self.channels[channel] = {"queues": set(), "upstream": upstream, "task": task,
-                                                   "generation": resource.generation}
-            queue = LatestByType()
+                                                   "generation": resource.generation if resource is not None else self.platform.world_generation}
+            queue = LogMailbox() if channel.endswith(".logs") else LatestByType()
             entry["queues"].add(queue)
             return queue
 
@@ -71,12 +72,14 @@ class Realtime:
                 task.cancel()
         if task:
             await asyncio.gather(task, return_exceptions=True)
+            await entry["upstream"].close()
 
     async def close(self):
         entries = list(self.channels.values())
         self.channels.clear()
         for entry in entries: entry["task"].cancel()
         await asyncio.gather(*(entry["task"] for entry in entries), return_exceptions=True)
+        await asyncio.gather(*(entry["upstream"].close() for entry in entries))
 
     async def invalidate_drone(self, drone_id):
         async with self.lock:
@@ -90,19 +93,38 @@ class Realtime:
                                       "world_generation": self.platform.world_generation})
                 entry["task"].cancel()
         await asyncio.gather(*(entry["task"] for _, entry in entries), return_exceptions=True)
+        await asyncio.gather(*(entry["upstream"].close() for _, entry in entries))
 
     async def invalidate_all(self):
+        async with self.lock:
+            entry = self.channels.pop("world.logs", None)
+            if entry:
+                for queue in tuple(entry["queues"]):
+                    queue.clear()
+                    queue.put_nowait({"channel": "world.logs", "type": "invalidated",
+                                      "world_generation": self.platform.world_generation})
+                entry["task"].cancel()
+        if entry:
+            await asyncio.gather(entry["task"], return_exceptions=True)
+            await entry["upstream"].close()
         ids = set(self.platform.drones)
         for drone_id in ids:
             await self.invalidate_drone(drone_id)
 
     async def _upstream(self, channel):
+        if channel == "world.logs":
+            if self.platform.operation in {"world_reset", "gazebo_reboot", "world_patch"}:
+                raise ValueError("world operation in progress")
+            base = self.platform.settings.gazebo_url.replace("http://", "ws://").replace("https://", "wss://")
+            return await connect(base + "/api/v1/world/logs", open_timeout=5), None
         parts = channel.split(".")
-        if len(parts) == 3 and parts[0] == "drone" and parts[2] == "telemetry":
+        if len(parts) == 3 and parts[0] == "drone" and parts[2] in {"telemetry", "logs"}:
             item = self.platform._record(parts[1])
+            if item.status in {"creating", "resetting", "deleting"}:
+                raise ValueError("drone operation in progress")
             if not item.instance_id: raise ValueError("autopilot is stopped")
             base = self.platform.settings.hub_url.replace("http://", "ws://").replace("https://", "wss://")
-            path = f"/api/v1/instances/{quote(item.instance_id)}/telemetry"
+            path = f"/api/v1/instances/{quote(item.instance_id)}/{parts[2]}"
             return await connect(base + path, open_timeout=5), item
         if len(parts) == 4 and parts[0] == "drone" and parts[2] == "sensor":
             item = self.platform._record(parts[1])
@@ -117,14 +139,17 @@ class Realtime:
             async for raw in upstream:
                 if entry is None or self.channels.get(channel) is not entry: return
                 item = resource
-                if item.id not in self.platform.drones or item.generation != entry["generation"]:
+                if item is None:
+                    if self.platform.world_generation != entry["generation"]:
+                        break
+                elif item.id not in self.platform.drones or item.generation != entry["generation"]:
                     break
                 payload = json.loads(raw)
                 kind = payload.get("type") or payload.get("channel") or "sample"
-                envelope = {"channel": channel, "type": kind, "drone_id": item.id,
+                envelope = {"channel": channel, "type": kind, "drone_id": item.id if item is not None else None,
                             "received_at": datetime.now(timezone.utc).isoformat(),
                             "world_generation": self.platform.world_generation,
-                            "runtime_generation": item.generation, "data": payload}
+                            "runtime_generation": item.generation if item is not None else None, "data": payload}
                 if payload.get("sim_time") is not None:
                     envelope["source_time"] = {"value": payload["sim_time"], "clock": "simulation"}
                 elif payload.get("timestamp") is not None:
