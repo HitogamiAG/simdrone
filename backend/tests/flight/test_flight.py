@@ -303,18 +303,14 @@ def test_real_mission_cancel_returns_and_is_idempotent(flight):
     assert flight.wait_landed(drone_id, station)["armed"] is False
 
 
-def test_real_offboard_body_axes_yaw_and_speed_limits(flight):
+def test_real_offboard_body_axes_yaw_and_default_speed_limits(flight):
     created = flight.create_drone()
     drone_id, model = created["id"], created["name"]
     observer = flight.observers[-1]
     initial_alt = altitude(event_data(observer, "telemetry")[0])
-    parameters = flight.request("PATCH", f"/api/v1/drones/{drone_id}/autopilot/parameters",
-        expected=(200,), json={"MPC_XY_VEL_MAX": 1.2, "MPC_Z_VEL_MAX_UP": .6,
-                               "MPC_Z_VEL_MAX_DN": .6}).json()
-    assert parameters["parameters"]["MPC_XY_VEL_MAX"] == pytest.approx(1.2)
     session = flight.request("POST", f"/api/v1/drones/{drone_id}/flight/offboard/sessions",
                              expected=(201,), json={"request_id": str(uuid.uuid4())}).json()
-    assert session["limits"]["horizontal_m_s"] == pytest.approx(1.2)
+    assert session["limits"]["horizontal_m_s"] == pytest.approx(3)
     assert session["limits"]["up_m_s"] <= 1
     assert session["limits"]["down_m_s"] <= 1
     assert session["limits"]["yaw_deg_s"] <= 60
@@ -323,15 +319,16 @@ def test_real_offboard_body_axes_yaw_and_speed_limits(flight):
         flight.request("POST", f"/api/v1/drones/{drone_id}/flight/offboard/sessions/{session['session_id']}/arm",
                        expected=(202,), json={"request_id": str(uuid.uuid4())})
         seq = drive(ws, 0, 2.5)
-        # With the PX4 ascent limit reduced to 0.6 m/s, allow enough time for
-        # the vehicle to clear ground effect and require a physical climb.
-        seq, _, raised = command_and_pose(flight, ws, seq, model, 6, up=.7)
-        assert raised["position"]["z"] > initial_alt + 1.2
+        seq, airborne = drive_to_altitude(ws, seq, observer, initial_alt,
+                                          {"up": .7}, target_delta=4)
+        assert altitude(airborne) > initial_alt + 4
         vertical = observer.telemetry()["velocity"].get("down_m_s", 0)
         assert abs(float(vertical)) <= session["limits"]["up_m_s"] * 1.2
         seq, forward_start, forward_end = command_and_pose(flight, ws, seq, model, 1.5, forward=.45)
         seq, right_start, right_end = command_and_pose(flight, ws, seq, model, 1.5, right=.45)
-        seq, yaw_start, turned = command_and_pose(flight, ws, seq, model, 2, yaw=.5)
+        seq, yaw_start, turned = command_and_pose(flight, ws, seq, model, 2, yaw=.9)
+        seq, turned_forward_start, turned_forward_end = command_and_pose(
+            flight, ws, seq, model, 1.5, forward=.45)
         seq, reverse_start, reverse_end = command_and_pose(flight, ws, seq, model, 1.5, forward=-.45)
         seq, left_start, left_end = command_and_pose(flight, ws, seq, model, 1.5, right=-.45)
         seq, up_start, lowered = command_and_pose(flight, ws, seq, model, 1.5, up=-.5)
@@ -350,7 +347,13 @@ def test_real_offboard_body_axes_yaw_and_speed_limits(flight):
         assert right_proj < -.3, f"right input moved opposite body-right: {(rx, ry)}"
         yaw_delta = math.atan2(math.sin(yaw_from_pose(turned) - yaw_from_pose(yaw_start)),
                                math.cos(yaw_from_pose(turned) - yaw_from_pose(yaw_start)))
-        assert abs(yaw_delta) > math.radians(10), f"yaw input did not rotate the vehicle: {yaw_delta}"
+        assert math.radians(60) < abs(yaw_delta) < math.radians(130), \
+            f"yaw input did not make the expected turn: {math.degrees(yaw_delta):.1f} degrees"
+        tx, ty = displacement(turned_forward_start, turned_forward_end)
+        turned_forward_proj = (tx * math.cos(yaw_from_pose(turned_forward_start))
+                               + ty * math.sin(yaw_from_pose(turned_forward_start)))
+        assert turned_forward_proj > .3, \
+            f"forward input after yaw did not follow the new body heading: {(tx, ty)}"
         bx, by = displacement(reverse_start, reverse_end)
         reverse_proj = bx * math.cos(yaw_from_pose(reverse_start)) + by * math.sin(yaw_from_pose(reverse_start))
         assert reverse_proj < -.3, f"negative forward input did not move backward: {(bx, by)}"
@@ -360,7 +363,8 @@ def test_real_offboard_body_axes_yaw_and_speed_limits(flight):
         assert lowered["position"]["z"] < up_start["position"]["z"] - .3
         assert lowered["position"]["z"] > created["simulation"]["pose"]["position"]["z"] + 1
 
-        # Observe the established speed after the command transition.
+        # Observe diagonal speed after the command transition. This uses the
+        # standard MVP parameters; altered PX4 parameter behavior is tested separately.
         seq = drive(ws, seq, 2, forward=.5, right=.5)
         telemetry = observer.telemetry()
         velocity = telemetry["velocity"]
@@ -370,6 +374,35 @@ def test_real_offboard_body_axes_yaw_and_speed_limits(flight):
             f"diagonal speed {speed:.2f}m/s exceeds the advertised limit"
     finally:
         ws.close()
+    flight.request("POST", f"/api/v1/drones/{drone_id}/flight/return", expected=(202,),
+                   json={"request_id": str(uuid.uuid4())})
+    assert flight.wait_landed(drone_id,
+        flight.native_geodetic(created["simulation"]["pose"]["position"]))["armed"] is False
+
+
+def test_real_offboard_reduced_px4_speed_limits(flight):
+    """Recommended extended check; not part of the MVP default-parameter suite."""
+    created = flight.create_drone()
+    drone_id = created["id"]
+    observer = flight.observers[-1]
+    initial_alt = altitude(event_data(observer, "telemetry")[0])
+    parameters = flight.request("PATCH", f"/api/v1/drones/{drone_id}/autopilot/parameters",
+        expected=(200,), json={"MPC_XY_VEL_MAX": 1.2, "MPC_Z_VEL_MAX_UP": .6,
+                               "MPC_Z_VEL_MAX_DN": .6}).json()
+    assert parameters["parameters"]["MPC_XY_VEL_MAX"] == pytest.approx(1.2)
+    session = flight.request("POST", f"/api/v1/drones/{drone_id}/flight/offboard/sessions",
+                             expected=(201,), json={"request_id": str(uuid.uuid4())}).json()
+    assert session["limits"]["horizontal_m_s"] == pytest.approx(1.2)
+    ws = control_socket(drone_id, session)
+    try:
+        flight.request("POST", f"/api/v1/drones/{drone_id}/flight/offboard/sessions/{session['session_id']}/arm",
+                       expected=(202,), json={"request_id": str(uuid.uuid4())})
+        seq = drive(ws, 0, 2.5)
+        seq, _, raised = command_and_pose(flight, ws, seq, created["name"], 6, up=.7)
+        assert raised["position"]["z"] > initial_alt + 1.2
+    finally:
+        ws.close()
+    # In case the reduced-limit climb succeeds, always request safe return.
     flight.request("POST", f"/api/v1/drones/{drone_id}/flight/return", expected=(202,),
                    json={"request_id": str(uuid.uuid4())})
     assert flight.wait_landed(drone_id,
