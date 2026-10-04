@@ -15,6 +15,32 @@ WGS84_A = 6378137.0
 WGS84_F = 1 / 298.257223563
 
 
+class _MissionProgress:
+    """One owned stream read, preserved across state polling timeouts."""
+
+    def __init__(self, stream):
+        self.stream = stream.__aiter__()
+        self.pending = None
+
+    async def wait(self, timeout=.5):
+        if self.pending is None:
+            self.pending = asyncio.create_task(anext(self.stream))
+        done, _ = await asyncio.wait({self.pending}, timeout=timeout)
+        if not done:
+            return None
+        try:
+            return self.pending.result()
+        finally:
+            self.pending = None
+
+    async def close(self):
+        if self.pending is not None:
+            self.pending.cancel()
+            await asyncio.gather(self.pending, return_exceptions=True)
+            self.pending = None
+        await self.stream.aclose()
+
+
 @dataclass
 class Execution:
     id: str
@@ -261,6 +287,7 @@ class FlightController:
 
     async def _run_mission(self, execution, mission):
         original_rtl_altitude = None
+        progress_reader = None
         try:
             execution.phase = "uploading"
             # PX4 requires MISSION_CURRENT to identify a navigational mission
@@ -287,7 +314,7 @@ class FlightController:
             execution.phase, execution.status = "mission", "active"
             if not await self._start_mission_mode(execution):
                 return
-            progress_stream = self.record.system.mission_raw.mission_progress().__aiter__()
+            progress_reader = _MissionProgress(self.record.system.mission_raw.mission_progress())
             while True:
                 if self.active is not execution: return
                 # PX4 may leave MissionRaw progress on the final RTL item and
@@ -307,9 +334,9 @@ class FlightController:
                 if _mission_route_finished(execution.current, len(mission["waypoints"]), mode):
                     break
                 try:
-                    progress = await asyncio.wait_for(anext(progress_stream), timeout=.5)
-                except asyncio.TimeoutError:
-                    continue
+                    progress = await progress_reader.wait()
+                    if progress is None:
+                        continue
                 except StopAsyncIteration:
                     # Some PX4/MAVSDK combinations close this subscription
                     # between progress updates. Reconcile with the MAVSDK
@@ -323,7 +350,8 @@ class FlightController:
                     except Exception:
                         pass
                     await asyncio.sleep(.25)
-                    progress_stream = self.record.system.mission_raw.mission_progress().__aiter__()
+                    await progress_reader.close()
+                    progress_reader = _MissionProgress(self.record.system.mission_raw.mission_progress())
                     continue
                 execution.current = min(max(progress.current - 1, 0), len(mission["waypoints"]))
                 if progress.total and progress.current >= progress.total:
@@ -346,6 +374,9 @@ class FlightController:
             if original_rtl_altitude is not None and self._ground_confirmed():
                 try: await self.record.system.param.set_param_float("RTL_RETURN_ALT", original_rtl_altitude)
                 except Exception: pass
+        finally:
+            if progress_reader is not None:
+                await progress_reader.close()
 
     async def _start_mission_mode(self, execution):
         # MAVSDK start_mission only selects MISSION mode; repeating it does

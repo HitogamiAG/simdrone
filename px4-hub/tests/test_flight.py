@@ -448,3 +448,37 @@ def test_mission_mode_retry_requires_fresh_telemetry():
             await asyncio.gather(task, return_exceptions=True)
 
     asyncio.run(scenario())
+
+
+def test_mission_progress_polling_does_not_cancel_a_slow_stream_and_closes_pending_read():
+    from app.flight import _MissionProgress
+
+    async def scenario():
+        ready = asyncio.Event()
+        closed = asyncio.Event()
+        async def stream():
+            try:
+                await ready.wait()
+                yield SimpleNamespace(current=4, total=6)
+                await asyncio.Event().wait()
+            finally:
+                closed.set()
+
+        reader = _MissionProgress(stream())
+        try:
+            assert await reader.wait(timeout=.01) is None
+            pending = reader.pending
+            assert await reader.wait(timeout=.01) is None
+            assert reader.pending is pending
+            assert not closed.is_set()
+            ready.set()
+            progress = await reader.wait(timeout=1)
+            assert (progress.current, progress.total) == (4, 6)
+            assert await reader.wait(timeout=.01) is None
+        finally:
+            await reader.close()
+        assert closed.is_set()
+        assert reader.pending is None
+        await reader.close()
+
+    asyncio.run(scenario())
