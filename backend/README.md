@@ -2,7 +2,7 @@
 
 Backend — публичный FastAPI-оркестратор Gazebo Service и PX4 Hub. `main.py` собирает FastAPI и lifespan, `api.py` содержит HTTP/WebSocket-маршруты, `service.py` — сценарии, `adapters.py` — HTTP-клиенты зависимостей, `realtime.py` — общие подписки. Backend выдаёт устойчивый в пределах работы процесса `drone_id`, сериализует изменяющие сценарии одним lock и сводит диагностику. Gazebo Service владеет миром/моделями, PX4 Hub — SITL/MAVSDK процессами, MediaMTX — публикацией видео. Реестр Backend хранится только в памяти.
 
-**Статус Flight API:** исправлены пять дополнительно воспроизведённых ошибок частичного arm, паузы и конкурентных переходов RTL/land/watchdog. После исправлений Backend прошёл 21 тест, Hub — 43, включая пять новых сценариев. Реальные полёты с PX4 ещё не проверены, а согласованный план содержит другие открытые требования. Подробности: [повторный аудит](../docs/flight-api-followup-audit.md).
+**Статус Flight API:** исправлены пять дополнительно воспроизведённых ошибок частичного arm, паузы и конкурентных переходов RTL/land/watchdog. После исправлений Backend прошёл 21 тест, Hub — 44, включая шесть новых сценариев. Реальный изолированный прогон подтвердил Offboard, отмену и один проход MissionRaw; во второй чистой серии MissionRaw завис в `active/mission` над станцией и превысил 180 секунд. Полная приёмка Flight API не пройдена; перед продолжением необходимо сохранять PX4 ULog до cleanup и локализовать нестабильность запуска миссии. Подробности: [результаты flight-тестирования](../docs/flight-testing.md) и [повторный аудит](../docs/flight-api-followup-audit.md).
 
 ## Запуск и конфигурация
 
@@ -101,6 +101,10 @@ docker run --rm --network uav-simulation uav-webrtc-browser:test
 В Docker прошли Backend contract tests (**13 passed**), Hub tests (**21 passed**), реальная интеграция Backend с двумя PX4, realtime-интеграция, Gazebo `regression.py` и `smoke.py`, а также браузерный WebRTC-тест с декодированием кадра 1280×720 и двумя зрителями. `docker compose config --quiet` прошёл. Backend contract suite проверяет reconciliation после потерянного ответа, сериализацию camera actions, ошибки Pydantic и доступность failed-записей. Hub suite проверяет сохранение monitor при отказе parameter snapshot.
 
 Backend не восстанавливает соответствия после собственного рестарта и не усыновляет найденные Hub/Gazebo ресурсы; `/system/status` показывает неучтённые модели и instances. Явный world-reset удаляет все Hub instances перед перезагрузкой Gazebo; при отказе удаления Gazebo не перезапускается. Автоматического rollback внешних вызовов и автоматического восстановления сервисов нет.
+
+## Реальные полётные тесты
+
+Изолированный SITL набор запускается командой `sh backend/tests/flight/run.sh`. Он использует отдельный Compose project без опубликованных host ports и управляет дроном через публичный Backend API. Offboard и Mission проверяются по PX4 realtime телеметрии и независимым runtime-позам Gazebo Transport; JSON-артефакты находятся в игнорируемом `artifacts/flight/`. Первый полный прогон прошёл, второй обнаружил зависание миссии на взлётной высоте. Открытые сценарии и точные результаты перечислены в [документе тестирования полётов](../docs/flight-testing.md); полный контракт пока не принят.
 
 ## Live-логи для UI
 

@@ -1,0 +1,85 @@
+name: simdrone-flight-test
+
+# Overlay the production definitions to retain their pinned builds while
+# removing all host ports and assigning a private test network/volume.
+services:
+  gazebo-service:
+    extends:
+      file: docker-compose.yml
+      service: gazebo-service
+    env_file: !reset [.env.flight]
+    ports: !reset []
+    environment:
+      WORLD_SDF: /opt/uav/app/worlds/empty.sdf
+      WORLD_NAME: empty
+      MODEL_ROOTS: /opt/uav/app/models:/opt/uav/models
+      GZ_SIM_RESOURCE_PATH: /opt/uav/app/models:/opt/uav/models
+      GZ_PARTITION: simdrone-flight-test
+
+  px4-hub:
+    extends:
+      file: docker-compose.yml
+      service: px4-hub
+    env_file: !reset [.env.flight]
+    ports: !reset []
+    environment:
+      PX4_HUB_HOST: 0.0.0.0
+      PX4_HUB_PORT: 8002
+      GAZEBO_API_URL: http://gazebo-service:8000
+      MAX_INSTANCES: 3
+      GZ_PARTITION: simdrone-flight-test
+
+  backend:
+    extends:
+      file: docker-compose.yml
+      service: backend
+    env_file: !reset [.env.flight]
+    ports: !reset []
+    environment:
+      BACKEND_HOST: 0.0.0.0
+      BACKEND_PORT: 8003
+      GAZEBO_API_URL: http://gazebo-service:8000
+      PX4_HUB_API_URL: http://px4-hub:8002
+      MEDIAMTX_API_URL: http://mediamtx:9997
+      MISSION_DB: /data/missions.sqlite3
+    volumes:
+      - flight-test-missions:/data
+
+  mediamtx:
+    extends:
+      file: docker-compose.yml
+      service: mediamtx
+    ports: !reset []
+    environment:
+      API_BASE: http://gazebo-service:8000
+      MTX_WEBRTCALLOWORIGIN: http://localhost
+      MTX_WEBRTCADDITIONALHOSTS: localhost
+      MTX_WEBRTCIPSFROMINTERFACES: "no"
+
+  flight-runner:
+    build:
+      context: .
+      dockerfile: backend/tests/flight/Dockerfile
+    image: uav-flight-tests:local
+    user: "0:0"
+    profiles: [test]
+    environment:
+      BACKEND_URL: http://backend:8003
+      HUB_URL: http://px4-hub:8002
+      GAZEBO_URL: http://gazebo-service:8000
+      GZ_PARTITION: simdrone-flight-test
+      FLIGHT_ARTIFACTS: /artifacts
+    volumes:
+      - ./artifacts/flight:/artifacts
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks: [default]
+
+volumes:
+  flight-test-missions:
+
+networks:
+  default:
+    name: simdrone-flight-test
+    driver: bridge

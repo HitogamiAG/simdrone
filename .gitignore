@@ -1,2 +1,4 @@
 .env
+.env.flight
 third-party
+artifacts/flight/
