@@ -74,6 +74,19 @@ def _geo(context, x, y, z=0.0):
     return math.degrees(lat), math.degrees(lon), altitude
 
 
+def _mission_items(mission):
+    """Build PX4 MissionRaw items with the first navigational waypoint active."""
+    from mavsdk_grpc.mission_raw import MissionItem
+    context = mission["coordinate_context"]
+    items = [MissionItem(0, 2, 178, 0, 1, 1.0, mission["cruise_speed_m_s"], -1.0, 0.0, 0, 0, 0.0, 0)]
+    for index, waypoint in enumerate(mission["waypoints"]):
+        lat, lon, altitude = _geo(context, waypoint["x"], waypoint["y"], waypoint["z"])
+        items.append(MissionItem(index + 1, 5, 16, 1 if index == 0 else 0, 1, 0.0, 1.0, 0.0, float("nan"),
+            round(lat * 1e7), round(lon * 1e7), altitude, 0))
+    items.append(MissionItem(len(items), 2, 20, 0, 1, 0.0, 0.0, 0.0, 0.0, 0, 0, 0.0, 0))
+    return items
+
+
 class FlightController:
     def __init__(self, service, record):
         self.service, self.record = service, record
@@ -242,16 +255,11 @@ class FlightController:
     async def _run_mission(self, execution, mission):
         original_rtl_altitude = None
         try:
-            from mavsdk_grpc.mission_raw import MissionItem
             execution.phase = "uploading"
-            context = mission["coordinate_context"]
-            items = [MissionItem(0, 2, 178, 0, 1, 1.0, mission["cruise_speed_m_s"], -1.0, 0.0, 0, 0, 0.0, 0)]
-            for index, waypoint in enumerate(mission["waypoints"]):
-                lat, lon, altitude = _geo(context, waypoint["x"], waypoint["y"], waypoint["z"])
-                items.append(MissionItem(index + 1, 5, 16, 0, 1, 0.0, 1.0, 0.0, float("nan"),
-                    round(lat * 1e7), round(lon * 1e7),
-                    altitude, 0))
-            items.append(MissionItem(len(items), 2, 20, 0, 1, 0.0, 0.0, 0.0, 0.0, 0, 0, 0.0, 0))
+            # PX4 requires MISSION_CURRENT to identify a navigational mission
+            # item. DO_CHANGE_SPEED is an auxiliary command and cannot be the
+            # current item (otherwise upload is rejected with CURRENT_INVALID).
+            items = _mission_items(mission)
             await self.record.system.mission_raw.upload_mission(items)
             original_rtl_altitude = await self.record.system.param.get_param_float("RTL_RETURN_ALT")
             await self.record.system.param.set_param_float("RTL_RETURN_ALT", mission["return_height_m"])
@@ -271,8 +279,45 @@ class FlightController:
                 raise TimeoutError("PX4 takeoff altitude was not observed")
             execution.phase, execution.status = "mission", "active"
             await self.record.system.mission_raw.start_mission()
-            async for progress in self.record.system.mission_raw.mission_progress():
+            # MISSION_START may be acknowledged while PX4 remains in HOLD
+            # (for example when the uploaded plan is unusable). Do not leave
+            # an armed vehicle hovering forever while waiting for progress.
+            mode_deadline = time.monotonic() + 10
+            while time.monotonic() < mode_deadline:
+                if self.active is not execution:
+                    return
+                if str(self.telemetry().get("flight_mode", "")).upper() == "MISSION":
+                    break
+                await asyncio.sleep(.1)
+            else:
+                raise RuntimeError("PX4 accepted mission start but did not enter MISSION mode")
+            progress_stream = self.record.system.mission_raw.mission_progress().__aiter__()
+            while True:
                 if self.active is not execution: return
+                # PX4 may leave MissionRaw progress on the final RTL item and
+                # stop publishing once it has landed. Ground/disarmed at the
+                # verified station is the authoritative completion signal.
+                if self._landed_at_station():
+                    break
+                try:
+                    progress = await asyncio.wait_for(anext(progress_stream), timeout=.5)
+                except asyncio.TimeoutError:
+                    continue
+                except StopAsyncIteration:
+                    # Some PX4/MAVSDK combinations close this subscription
+                    # between progress updates. Reconcile with the MAVSDK
+                    # mission status RPC and subscribe again; stream closure
+                    # alone does not mean that the flight ended.
+                    if self._landed_at_station():
+                        break
+                    try:
+                        if await self.record.system.mission_raw.is_mission_finished():
+                            break
+                    except Exception:
+                        pass
+                    await asyncio.sleep(.25)
+                    progress_stream = self.record.system.mission_raw.mission_progress().__aiter__()
+                    continue
                 execution.current = min(max(progress.current - 1, 0), len(mission["waypoints"]))
                 if progress.total and progress.current >= progress.total:
                     break

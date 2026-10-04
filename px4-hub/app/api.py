@@ -143,7 +143,13 @@ async def flight_events(instance_id: str, websocket: WebSocket):
     await websocket.accept()
     try:
         while True:
-            if service._flight(instance_id).generation != generation:
+            try:
+                current = service._flight(instance_id)
+            except HubError:
+                try: await websocket.close(code=1012, reason="flight instance ended")
+                except RuntimeError: pass
+                return
+            if current.generation != generation:
                 await websocket.close(code=1012, reason="flight generation changed")
                 return
             await websocket.send_json({"type": "flight", **flight.state()})

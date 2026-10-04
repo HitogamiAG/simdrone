@@ -5,7 +5,7 @@ import asyncio
 import time
 from types import SimpleNamespace
 
-from app.flight import Execution, FlightController, _geo
+from app.flight import Execution, FlightController, _geo, _mission_items
 from app.api import create_app
 from app.adapters import Px4Adapter
 
@@ -25,6 +25,16 @@ def test_local_origin_maps_to_world_origin():
     assert math.isclose(lat, 47.0, abs_tol=1e-12)
     assert math.isclose(lon, 8.0, abs_tol=1e-12)
     assert math.isclose(altitude, 0.0, abs_tol=1e-4)
+
+
+def test_missionraw_current_flag_selects_first_navigation_waypoint():
+    items = _mission_items({"coordinate_context": {"latitude_deg": 43.0,
+        "longitude_deg": 76.0, "elevation": 800.0, "heading_deg": 0.0},
+        "cruise_speed_m_s": 2.0,
+        "waypoints": [{"x": 1.0, "y": 2.0, "z": 6.0},
+                      {"x": 3.0, "y": 4.0, "z": 7.0}]})
+    assert [item.current for item in items] == [0, 1, 0, 0]
+    assert items[1].command == 16
 
 
 def test_offboard_velocity_is_limited_by_active_px4_and_resultant_speed(monkeypatch):
