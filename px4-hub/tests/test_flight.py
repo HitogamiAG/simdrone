@@ -85,3 +85,27 @@ def test_watchdog_holds_then_returns_after_control_input_is_lost(monkeypatch):
         await controller.delete_session(created["session_id"])
 
     asyncio.run(scenario())
+
+
+def test_return_remains_available_after_binding_and_armability_are_lost():
+    async def scenario():
+        class FakeAction:
+            def __init__(self): self.rtl = 0
+            async def return_to_launch(self): self.rtl += 1
+
+        action = FakeAction()
+        record = SimpleNamespace(id="instance", status="running", binding_valid=False,
+            binding_error="model disappeared", saved_parameters={}, station_pose=None,
+            telemetry=SimpleNamespace(connected=True, latest={"health": {"is_armable": False},
+                "armed": True, "landed_state": "IN_AIR", "position": {}},
+                received_by_type={"position": asyncio.get_running_loop().time()}),
+            system=SimpleNamespace(action=action))
+        service = SimpleNamespace(simulation_paused=False,
+            settings=SimpleNamespace(telemetry_stale_after=5.0),
+            _get_running=lambda _instance_id: record)
+        controller = FlightController(service, record)
+        result = await controller.action("return", "request-1")
+        assert result["status"] == "returning"
+        assert action.rtl == 1
+
+    asyncio.run(scenario())

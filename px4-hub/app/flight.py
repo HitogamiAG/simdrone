@@ -105,9 +105,9 @@ class FlightController:
         return {"session_id": session.id, "status": session.status, "armed": session.armed,
                 "owner_connected": session.owner_connected}
 
-    def _preflight(self):
+    def _preflight(self, *, require_binding=True, require_armable=True):
         self.service._get_running(self.record.id)
-        if self.record.binding_valid is not True:
+        if require_binding and self.record.binding_valid is not True:
             raise HubError(409, "drone_binding_unverified", "Gazebo binding must be valid before flight", self.record.binding_error)
         if self.service.simulation_paused:
             raise HubError(409, "simulation_paused", "Flight control requires a running simulation")
@@ -116,7 +116,7 @@ class FlightController:
         if not self.state()["telemetry_fresh"]:
             raise HubError(409, "telemetry_stale", "Fresh position telemetry is required for flight control")
         health = self.telemetry().get("health", {})
-        if not health.get("is_armable"):
+        if require_armable and not health.get("is_armable"):
             raise HubError(409, "px4_not_armable", "PX4 health does not permit arming", health)
 
     async def validate_mission(self, mission):
@@ -297,7 +297,8 @@ class FlightController:
                 if previous[0] != action:
                     raise HubError(409, "request_id_conflict", "request_id was used for another flight command")
                 return previous[1]
-            self._preflight()
+            # Return and land remain available after Gazebo binding or arming health is lost in flight.
+            self._preflight(require_binding=False, require_armable=False)
             if self.active and self.active.status not in {"completed", "cancelled", "failed", "interrupted"}:
                 if action == "return":
                     result = await self.cancel(self.active.id)
