@@ -59,7 +59,7 @@ World-reset/reboot не создаёт runtime-дроны снова: Backend и
 
 ## Realtime и видео
 
-`GET /api/v1/world/map` отдаёт identity статического Blender-пакета карты без передачи геометрии. Backend читает JSON manifest по `WORLD_MAP_MANIFEST` (по умолчанию `/world-model/manifest.json`), проверяет наличие `package_id`, `version`, `world_name`, `coordinate_system` и `model`, и возвращает `available: true`, эти поля, а также `bounds`, `gazebo_to_glb` и `control_points`, если они заданы. При отсутствии файла возвращается `available: false, reason: world_model_missing`; при некорректном JSON/контракте — `world_model_manifest_invalid`. Compose монтирует `./world-model` read-only в `/world-model`; директория пока не поставляется, поэтому карта frontend должна сообщать о блокировке. Геометрия остаётся статическим локальным browser asset.
+`GET /api/v1/world/map` отдаёт identity статического Blender-пакета карты без передачи геометрии. Backend читает JSON manifest по `WORLD_MAP_MANIFEST` (по умолчанию `/world-model/manifest.json`), проверяет наличие `package_id`, `version`, `world_name`, `coordinate_system` и `model`, и возвращает `available: true`, эти поля, а также `bounds`, `gazebo_to_glb` и `control_points`, если они заданы. При отсутствии файла возвращается `available: false, reason: world_model_missing`; при некорректном JSON/контракте — `world_model_manifest_invalid`. Compose монтирует `./world-model` read-only в `/world-model`; пакет `empty` поставляется, описание экспорта и ограничения приёмки — в [`world-model/README.md`](../world-model/README.md). Геометрия остаётся статическим локальным browser asset.
 
 WebSocket принимает, например:
 
