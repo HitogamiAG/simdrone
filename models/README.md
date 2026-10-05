@@ -13,6 +13,8 @@
 2,5×2,5×0,3 м с ArUco `DICT_4X4_50`, ID `0`, размером 0,5 м.
 Содержит Blender-исходник, GLB и готовые `model.sdf`/`model.config`;
 подключается к миру через `<include><uri>model://drone_pad</uri></include>`.
+World frame `spawn_pad__<имя include>` задаёт позу корня дрона над площадкой;
+Gazebo Service публикует каталог через `/api/v1/world/spawn-pads`.
 
 ## Источники
 

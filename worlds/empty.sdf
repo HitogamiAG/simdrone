@@ -62,5 +62,21 @@
         </visual>
       </link>
     </model>
+    <include>
+      <uri>model://drone_pad</uri>
+      <name>landing_pad_01</name>
+      <pose>-3 0 0 0 0 0</pose>
+    </include>
+    <frame name="spawn_pad__landing_pad_01" attached_to="landing_pad_01">
+      <pose relative_to="landing_pad_01">0 0 0.292 0 0 0</pose>
+    </frame>
+    <include>
+      <uri>model://drone_pad</uri>
+      <name>landing_pad_02</name>
+      <pose>3 0 0 0 0 0</pose>
+    </include>
+    <frame name="spawn_pad__landing_pad_02" attached_to="landing_pad_02">
+      <pose relative_to="landing_pad_02">0 0 0.292 0 0 0</pose>
+    </frame>
   </world>
 </sdf>

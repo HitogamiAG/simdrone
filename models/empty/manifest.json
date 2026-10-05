@@ -1,6 +1,6 @@
 {
   "package_id": "simdrone-empty",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "world_name": "empty",
   "coordinate_system": "gazebo_xyz_z_up",
   "units": "meters",
@@ -123,13 +123,115 @@
         0,
         100.0
       ]
+    },
+    {
+      "name": "landing_pad_01_base",
+      "gazebo": [
+        -3.0,
+        0.0,
+        0
+      ],
+      "glb": [
+        -3.0,
+        0,
+        -0.0
+      ]
+    },
+    {
+      "name": "landing_pad_01_surface",
+      "gazebo": [
+        -3.0,
+        0.0,
+        0.3
+      ],
+      "glb": [
+        -3.0,
+        0.3,
+        -0.0
+      ]
+    },
+    {
+      "name": "landing_pad_02_base",
+      "gazebo": [
+        3.0,
+        0.0,
+        0
+      ],
+      "glb": [
+        3.0,
+        0,
+        -0.0
+      ]
+    },
+    {
+      "name": "landing_pad_02_surface",
+      "gazebo": [
+        3.0,
+        0.0,
+        0.3
+      ],
+      "glb": [
+        3.0,
+        0.3,
+        -0.0
+      ]
+    }
+  ],
+  "spawn_pads": [
+    {
+      "id": "landing_pad_01",
+      "position": [
+        -3.0,
+        0.0,
+        0
+      ],
+      "surface_position": [
+        -3.0,
+        0.0,
+        0.3
+      ],
+      "spawn_position": [
+        -3.0,
+        0.0,
+        0.292
+      ],
+      "orientation_rpy": [
+        0,
+        0,
+        0
+      ],
+      "drone_model": "x500_gimbal"
+    },
+    {
+      "id": "landing_pad_02",
+      "position": [
+        3.0,
+        0.0,
+        0
+      ],
+      "surface_position": [
+        3.0,
+        0.0,
+        0.3
+      ],
+      "spawn_position": [
+        3.0,
+        0.0,
+        0.292
+      ],
+      "orientation_rpy": [
+        0,
+        0,
+        0
+      ],
+      "drone_model": "x500_gimbal"
     }
   ],
   "collision": "Gazebo plane (infinite); visual footprint is finite",
   "blender_version": "5.2.2 LTS",
   "sha256": {
-    "empty.blend": "e0baff92ea5804595778ea961ba56aad4dc14cb7f2621b2ed423ad92b13b730c",
-    "world.glb": "2ae6493f0c96f1ce41bdb3bd9bfd13f24c40720897569f08c918893a83ccc93c",
-    "../../worlds/empty.sdf": "a9bbe030319dcd078ea2d9d5df4917a3add8c7b402b4bfa10394db6b673d6d3d"
+    "empty.blend": "4e1605e0034f96c8359e3c21b24c32a0f70c97ee09c5b86e0fab9c4b7e011080",
+    "world.glb": "8d3e68bb5527cb4c415d8216206d136e3fa263522adcd65a5d8da6153fe06a8f",
+    "../../worlds/empty.sdf": "ff136383a5e151bfa8844d03ac578d00ba004e4672a5f22cf5e7780963e13ab6"
   }
 }
