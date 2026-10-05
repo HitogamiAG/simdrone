@@ -1,4 +1,4 @@
-import { Suspense, useEffect, useMemo } from 'react'
+import { Suspense, useEffect, useMemo, useRef } from 'react'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
 import { Line, OrbitControls, OrthographicCamera, PerspectiveCamera, useGLTF } from '@react-three/drei'
 import { CanvasTexture, EventDispatcher, Matrix4, MOUSE, Plane, Quaternion, Vector3 } from 'three'
@@ -106,16 +106,19 @@ function SpriteLabel({ title, subtitle, color, position, scale }: { title: strin
 }
 
 
-function CameraBehavior({ view, zoom, focus, follow }: { view: '2d' | '3d'; zoom: number; focus: [number, number, number]; follow: boolean }) {
+function CameraBehavior({ view, zoom, focus, focusKey, follow }: { view: '2d' | '3d'; zoom: number; focus: [number, number, number]; focusKey: string; follow: boolean }) {
   const { camera, controls } = useThree()
   const orbit = controls as (EventDispatcher & { target: Vector3; update: () => void }) | null
+  const focusRef = useRef(focus)
+  useEffect(() => { focusRef.current = focus }, [focus])
   useEffect(() => {
+    const [x, y, z] = focusRef.current
     // oxlint-disable-next-line react/immutability
     if (view === '2d') camera.zoom = 42 * zoom
-    else camera.position.set(focus[0] + 14 / zoom, focus[1] - 18 / zoom, focus[2] + 14 / zoom)
+    else camera.position.set(x + 14 / zoom, y - 18 / zoom, z + 14 / zoom)
     camera.updateProjectionMatrix()
-    if (orbit) { orbit.target.set(...focus); orbit.update() }
-  }, [camera, focus, orbit, view, zoom])
+    if (orbit) { orbit.target.set(x, y, z); orbit.update() }
+  }, [camera, focusKey, orbit, view, zoom])
   const target = useMemo(() => new Vector3(...focus), [focus])
   useFrame((_, delta) => {
     if (!follow || !orbit) return
@@ -125,8 +128,8 @@ function CameraBehavior({ view, zoom, focus, follow }: { view: '2d' | '3d'; zoom
   return null
 }
 
-function Scene({ manifest, pads, drones, route, routeEditing, selectedDrone, view, zoom, focus, follow, showPads, showDrones, showGrid, onSelectDrone, onSelectPad, onDroneContext, onAddRoutePoint, onMoveRoutePoint }: {
-  manifest: MapManifest; pads: Pad[]; drones: Drone[]; route: RoutePoint[]; routeEditing: boolean; selectedDrone: string | null; view: '2d' | '3d'; zoom: number; focus: [number, number, number]; follow: boolean; showPads: boolean; showDrones: boolean; showGrid: boolean
+function Scene({ manifest, pads, drones, route, routeEditing, selectedDrone, view, zoom, focus, focusKey, follow, showPads, showDrones, showGrid, onSelectDrone, onSelectPad, onDroneContext, onAddRoutePoint, onMoveRoutePoint }: {
+  manifest: MapManifest; pads: Pad[]; drones: Drone[]; route: RoutePoint[]; routeEditing: boolean; selectedDrone: string | null; view: '2d' | '3d'; zoom: number; focus: [number, number, number]; focusKey: string; follow: boolean; showPads: boolean; showDrones: boolean; showGrid: boolean
   onSelectDrone: (drone: Drone) => void; onSelectPad: (pad: Pad) => void; onDroneContext: (drone: Drone, x: number, y: number) => void; onAddRoutePoint: (point: RoutePoint) => void; onMoveRoutePoint: (index: number, x: number, y: number) => void
 }) {
   const orthographic = view === '2d'
@@ -135,7 +138,7 @@ function Scene({ manifest, pads, drones, route, routeEditing, selectedDrone, vie
       ? <OrthographicCamera makeDefault position={[0, 0, 90]} up={[0, 0, 1]} zoom={42} near={0.1} far={1000} />
       : <PerspectiveCamera makeDefault position={[14, -18, 14]} up={[0, 0, 1]} fov={42} near={0.1} far={1000} />}
     <color attach="background" args={['#181a1e']} />
-    <CameraBehavior view={view} zoom={zoom} focus={focus} follow={follow} />
+    <CameraBehavior view={view} zoom={zoom} focus={focus} focusKey={focusKey} follow={follow} />
     <ambientLight intensity={1.15} /><directionalLight position={[20, -20, 35]} intensity={2.1} />
     <Suspense fallback={null}><WorldModel manifest={manifest} /></Suspense>
     {routeEditing && <mesh position={[0, 0, 0.006]} onClick={(event) => { event.stopPropagation(); onAddRoutePoint({ x: Number(event.point.x.toFixed(2)), y: Number(event.point.y.toFixed(2)), z: 10 }) }}><planeGeometry args={[200, 200]} /><meshBasicMaterial transparent opacity={0} depthWrite={false} /></mesh>}
@@ -143,12 +146,12 @@ function Scene({ manifest, pads, drones, route, routeEditing, selectedDrone, vie
     {showPads && pads.map((pad) => <SpawnPad key={pad.id} pad={pad} onSelect={onSelectPad} />)}
     <MissionRoute points={route} editable={routeEditing} onMovePoint={onMoveRoutePoint} />
     {showDrones && drones.map((drone) => <DroneMarker key={drone.id} drone={drone} selected={drone.id === selectedDrone} onSelect={onSelectDrone} onContext={onDroneContext} />)}
-    <OrbitControls makeDefault enablePan enableZoom enableRotate={!orthographic && !routeEditing} mouseButtons={{ MIDDLE: MOUSE.PAN, RIGHT: MOUSE.PAN }} minPolarAngle={orthographic ? 0.001 : 0} maxPolarAngle={orthographic ? 0.001 : Math.PI} />
+    <OrbitControls makeDefault enableDamping={false} enablePan enableZoom enableRotate={!orthographic && !routeEditing} mouseButtons={{ MIDDLE: MOUSE.PAN, RIGHT: MOUSE.PAN }} minPolarAngle={orthographic ? 0.001 : 0} maxPolarAngle={orthographic ? 0.001 : Math.PI} />
   </>
 }
 
 export default function MapView(props: {
-  view: '2d' | '3d'; zoom: number; focus: [number, number, number]; follow: boolean; manifest: MapManifest; pads: Pad[]; drones: Drone[]; route: RoutePoint[]; routeEditing: boolean; selectedDrone: string | null; showPads: boolean; showDrones: boolean; showGrid: boolean
+  view: '2d' | '3d'; zoom: number; focus: [number, number, number]; focusKey: string; follow: boolean; manifest: MapManifest; pads: Pad[]; drones: Drone[]; route: RoutePoint[]; routeEditing: boolean; selectedDrone: string | null; showPads: boolean; showDrones: boolean; showGrid: boolean
   onSelectDrone: (drone: Drone) => void; onSelectPad: (pad: Pad) => void; onDroneContext: (drone: Drone, x: number, y: number) => void; onPointerMissed: () => void; onAddRoutePoint: (point: RoutePoint) => void; onMoveRoutePoint: (index: number, x: number, y: number) => void
 }) {
   return <Canvas className="scene-root" onPointerMissed={props.onPointerMissed}>
