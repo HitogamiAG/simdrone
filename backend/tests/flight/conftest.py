@@ -603,14 +603,24 @@ class FlightEnvironment:
         return path
 
     @staticmethod
-    def _filter_px4_log(source: Path, target: Path, max_bytes: int) -> int:
+    def _filter_px4_log(source: Path, target: Path, max_bytes: int,
+                        max_scan_bytes: int = 64 * 1024 * 1024) -> int:
         ansi = re.compile(rb"\x1b\[[0-?]*[ -/]*[@-~]")
         useful = re.compile(rb"(?:INFO|WARN|ERROR|CRITICAL|DEBUG)\s+\[[^]]+\]")
         pending = b""
         written = 0
-        truncated = False
         with source.open("rb") as src, target.open("wb") as dst:
-            while chunk := src.read(65536):
+            src.seek(0, os.SEEK_END)
+            source_size = src.tell()
+            scan_start = max(0, source_size - max_scan_bytes)
+            src.seek(scan_start)
+            remaining = source_size - scan_start
+            truncated = scan_start > 0
+            while remaining > 0:
+                chunk = src.read(min(65536, remaining))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
                 pending += chunk
                 lines = re.split(rb"[\r\n]+", pending)
                 pending = lines.pop()
@@ -636,7 +646,8 @@ class FlightEnvironment:
                     else:
                         truncated = True
             if truncated:
-                marker = b"\n[PX4 process log filtered at 8 MiB]\n"
+                marker = (f"\n[PX4 log filtered: scanned bytes {scan_start}-{source_size}; "
+                          f"output limit {max_bytes} bytes]\n").encode()
                 dst.write(marker)
                 written += len(marker)
         return written

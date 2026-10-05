@@ -16,6 +16,20 @@ from conftest import (BACKEND, HUB, FlightEnvironment, MANEUVER_TIMEOUT,
                       MISSION_TIMEOUT, RETURN_TIMEOUT)
 
 
+def test_px4_log_filter_scans_only_a_bounded_tail(tmp_path):
+    source = tmp_path / "px4.log"
+    target = tmp_path / "filtered.log"
+    source.write_bytes(b"noise\n" * 2_000_000 + b"INFO [tail] final-message\n")
+
+    written = FlightEnvironment._filter_px4_log(
+        source, target, max_bytes=1024, max_scan_bytes=4096)
+
+    result = target.read_bytes()
+    assert b"INFO [tail] final-message" in result
+    assert b"scanned bytes" in result
+    assert written == len(result)
+
+
 @pytest.fixture
 def flight(request):
     env = FlightEnvironment()
