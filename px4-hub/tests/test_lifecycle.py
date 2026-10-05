@@ -7,6 +7,18 @@ from app.config import Settings
 from app.errors import HubError
 from app.service import InstanceService
 from app.telemetry import TelemetryFanout
+from app.telemetry import to_json
+
+
+def test_unavailable_px4_measurements_remain_valid_browser_json():
+    import json
+    from types import SimpleNamespace
+    sample = to_json(SimpleNamespace(temperature_degc=float("nan"),
+                                    voltage_v=float("inf"), remaining_percent=.75,
+                                    cells=[float("-inf"), 4.1]))
+    decoded = json.loads(json.dumps(sample, allow_nan=False))
+    assert decoded == {"temperature_degc": None, "voltage_v": None,
+                       "remaining_percent": .75, "cells": [None, 4.1]}
 
 
 class Process:

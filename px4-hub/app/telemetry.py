@@ -1,10 +1,13 @@
 import asyncio
 import dataclasses
 import enum
+import math
 from datetime import datetime, timezone
 
 
 def to_json(value):
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
     if dataclasses.is_dataclass(value):
         return {key: to_json(item) for key, item in dataclasses.asdict(value).items()}
     if isinstance(value, enum.Enum):
