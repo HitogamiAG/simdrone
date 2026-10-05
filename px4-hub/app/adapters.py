@@ -30,7 +30,8 @@ class Px4Adapter:
         }
         record.logs = LiveLogs("px4")
         record.px4_process = await asyncio.create_subprocess_exec(
-                str(self.settings.px4_binary), "-i", str(record.slot), cwd=workdir, env=env,
+                str(self.settings.px4_binary), "-d", "-i", str(record.slot), cwd=workdir, env=env,
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, start_new_session=True)
         record.log_reader = asyncio.create_task(self._read_output(record.px4_process, record.logs, workdir / "px4.log"))
         # MAVSDK only exposes its gRPC server after discovering a MAVLink system.

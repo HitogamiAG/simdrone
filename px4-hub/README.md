@@ -61,6 +61,8 @@ curl -X POST http://localhost:8002/api/v1/instances/ \
 
 Hub запускает выделенные MAVSDK и PX4 процессы, затем подключает Python-клиент к gRPC после обнаружения MAVLink-системы и ждёт позиционную телеметрию. Это сохраняет независимый backend для каждого instance и избегает взаимного ожидания старта PX4 и MAVSDK.
 
+PX4 запускается с `-d` (daemon mode без интерактивного `pxh` shell) и stdin `/dev/null`; stdout/stderr остаются в live logs и файле instance. Это устраняет непрерывную печать prompt при EOF в контейнере: старый запуск без терминала создавал многогигабайтный `px4.log` и лишнюю нагрузку на event loop. Остановка по process group и ownership процессов сохраняются.
+
 GET instance отдельно сообщает процессное состояние, привязку, доступность Gazebo, паузу, MAVSDK connection, свежесть телеметрии и `ready_to_arm`. `connected` поступает из MAVSDK `core.connection_state`; до первого наблюдения он равен `null`. `telemetry_fresh` относится к позиции; возраст и свежесть каждого типа доступны в `telemetry_age_seconds` и `telemetry_fresh_by_type`. Ошибки подписок видны в `stream_errors`. `ready_to_arm` требует свежего health, соединения и PX4 `is_armable`; это диагностика, а не гарантия успешной команды arm.
 
 `binding.valid` отделён от ошибок процессов: `true` — наблюдаемая модель совпадает, `false` — модель исчезла/изменилась, `null` — проверка недоступна. Причина находится в `binding.error`; успешное повторное наблюдение очищает её. При смене entity-id Hub не перепривязывает instance.
@@ -88,11 +90,11 @@ DELETE instance завершает только PX4 и MAVSDK, не затраг
 Контрактные тесты:
 
 ```sh
-docker run --rm --network none \
+docker run --rm --user 0 \
   -v "$PWD/px4-hub:/opt/px4-hub:ro" \
-  -e PYTHONPATH=/opt/px4-hub \
-  --entrypoint /opt/venv/bin/pytest uav-gazebo-service:local \
-  -q /opt/px4-hub/tests
+  --entrypoint sh uav-px4-hub:local -c \
+  '/opt/venv/bin/pip install --quiet --target /tmp/testdeps pytest==8.3.5 && \
+   PYTHONPATH=/tmp/testdeps:/opt/px4-hub /opt/venv/bin/python -m pytest -p no:cacheprovider -q /opt/px4-hub/tests'
 ```
 
 Gazebo Service проверяется последовательно в том же Compose окружении:
