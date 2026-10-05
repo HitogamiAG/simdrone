@@ -223,6 +223,55 @@ def test_real_offboard_vertical_motion_zero_hold_and_rtl(flight):
     assert state["armed"] is False
 
 
+def test_real_spawn_pad_contact_on_both_pads_and_release_after_delete(flight):
+    catalog = flight.request("GET", "/api/v1/world/spawn-pads").json()["pads"]
+    pads = {pad["id"]: pad for pad in catalog}
+    assert {"landing_pad_01", "landing_pad_02"} <= pads.keys()
+
+    for pad_id in ("landing_pad_01", "landing_pad_02"):
+        pad = pads[pad_id]
+        created = flight.create_drone(pad_id=pad_id)
+        drone_id, model = created["id"], created["name"]
+        assert created["spawn_pad_id"] == pad_id
+        assert created["initial_pose"] == pad["spawn_pose"]
+
+        center = pad["surface_pose"]["position"]
+        # The model's lowest gear collision is 13 mm below its root. Gazebo
+        # should settle the 5 mm SDF clearance onto this actual surface.
+        contact_root_z = center["z"] - .013
+        deadline = time.monotonic() + 30
+        stable_since = None
+        latest = None
+        while time.monotonic() < deadline:
+            latest = flight.gazebo.current(model)
+            state = flight.request("GET", f"/api/v1/drones/{drone_id}/flight").json()
+            landed = state.get("landed_state")
+            landed_value = landed.get("landed_state") if isinstance(landed, dict) else landed
+            position = latest["position"]
+            in_contact_pose = (
+                math.hypot(position["x"] - center["x"], position["y"] - center["y"]) < .05
+                and abs(position["z"] - contact_root_z) < .025
+            )
+            px4_on_ground = state.get("armed") is False and str(landed_value).lower() in {"on_ground", "2"}
+            if in_contact_pose and px4_on_ground:
+                stable_since = stable_since or time.monotonic()
+                if time.monotonic() - stable_since >= 1:
+                    break
+            else:
+                stable_since = None
+            time.sleep(.2)
+        else:
+            raise AssertionError(
+                f"{pad_id}: no stable chassis contact confirmed by Gazebo and PX4; "
+                f"pose={latest}; flight={state}"
+            )
+
+        deleted = flight.request("DELETE", f"/api/v1/drones/{drone_id}/", expected=(200, 204))
+        assert deleted.status_code in {200, 204}
+        available = flight.request("GET", "/api/v1/world/spawn-pads").json()["pads"]
+        assert next(item for item in available if item["id"] == pad_id)["availability"] == "available"
+
+
 def test_real_offboard_pause_resume_returns_and_lands(flight):
     created = flight.create_drone()
     drone_id = created["id"]
