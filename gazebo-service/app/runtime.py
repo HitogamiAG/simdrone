@@ -6,6 +6,7 @@ from typing import Any
 from google.protobuf import json_format
 from .config import LOCAL_ROOT, ROOT, Settings
 from .catalog import ModelCatalog
+from .spawn_pads import read_spawn_pads
 from .errors import ApiFault
 from .geometry import Pose, Quaternion, Vector3
 from .entities import DroneRecord, SensorRecord
@@ -36,6 +37,7 @@ class SessionState:
         self.models: dict[str, Path] = {}
         self.drones: dict[str, DroneRecord] = {}
         self.sensors: dict[str, SensorRecord] = {}
+        self.spawn_pads: list[dict] = []
         self.physics_values: dict[str, Any] = {}
         self.spherical_values: dict[str, Any] = {}
 
@@ -55,7 +57,7 @@ class RuntimeCoordinator:
         self._closed = False
         self.pose_tracker: PoseTracker | None = None
 
-    _STATE_FIELDS = {"generation", "models", "drones", "sensors", "physics_values", "spherical_values"}
+    _STATE_FIELDS = {"generation", "models", "drones", "sensors", "physics_values", "spherical_values", "spawn_pads"}
 
     def __setattr__(self, name, value):
         state = self.__dict__.get("state")
@@ -108,6 +110,17 @@ class RuntimeCoordinator:
             self.pose_tracker = PoseTracker(self.world, self.settings.world_name, lambda: self.generation)
             self.pose_tracker.start()
             self._read_initial_config(world_path)
+            try:
+                self.spawn_pads = read_spawn_pads(world_path, self.settings.world_name, self.settings.model_roots)
+            except ValueError as exc:
+                raise RuntimeError(str(exc)) from exc
+            if not self.spawn_pads:
+                raise RuntimeError("world must configure at least one drone spawn pad")
+            scene_names = {model.name for model in self._scene().model}
+            configured = {pad["id"] for pad in self.spawn_pads}
+            missing = sorted(configured - scene_names)
+            if missing:
+                raise RuntimeError(f"spawn pads missing from Gazebo scene: {missing}")
             self._discover_existing()
             self._refresh_sensors()
         except Exception:
@@ -151,7 +164,7 @@ class RuntimeCoordinator:
         snapshot = self._snapshot()
         for model in scene.model:
             name = model.name
-            if name in {"ground_plane", "sun"}:
+            if name in {"ground_plane", "sun"} or name in {pad["id"] for pad in self.spawn_pads}:
                 continue
             if any(r.name == name for r in self.drones.values()):
                 continue

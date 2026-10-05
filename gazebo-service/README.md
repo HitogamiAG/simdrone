@@ -31,6 +31,7 @@ Compose проверяет `/healthz`, ожидая запуска мира. `se
 | POST | `/api/v1/server/server-reboot/` | Перезапуск исходного мира и процесса Gazebo |
 | WebSocket | `/api/v1/world/logs` | Live stdout/stderr Gazebo Server без истории |
 | GET | `/api/v1/world` | Настройки, модели, свет, статистика, источники и возможности изменения |
+| GET | `/api/v1/world/spawn-pads` | Каталог площадок, поверхности и позы спауна из SDF |
 | PATCH | `/api/v1/world` | Частичное изменение поддерживаемых настроек |
 | POST | `/api/v1/world/world-reset` | Восстановление мира через перезапуск исходного SDF |
 | POST | `/api/v1/world/pause` | Пауза симуляции |
@@ -49,6 +50,19 @@ Compose проверяет `/healthz`, ожидая запуска мира. `se
 Поток поз использует уже работающую общую подписку Gazebo Transport `/world/{world}/pose/info`: HTTP handler читает только последний кешированный образец, не ждёт Gazebo Transport и ограничивает передачу 10 сообщениями в секунду. Событие содержит публичный Gazebo drone ID, entity ID, world generation, sequence, возраст образца, UTC `received_at` и полный XYZ/quaternion. Если источник pose/info временно недоступен или модель не найдена, WebSocket закрывается и клиенту следует перечитать состояние дрона и подписаться заново. Это внутренний транспортный контракт между Backend и Gazebo Service, не прямой endpoint для браузера.
 
 Pause/resume и activate/deactivate идемпотентны. Создание дрона возвращает HTTP `201`. API-id дрона отделён от `entity_id` Gazebo; идентификатор сенсора используется в пределах своего дрона.
+
+`GET /api/v1/world/spawn-pads` читает `<include>model://drone_pad</include>` и соответствующие
+world frames `spawn_pad__<include-name>` из исходного SDF. Ответ содержит pose площадки,
+surface pose, размер из box collision модели и явный `spawn_pose` для `x500_gimbal`.
+Координаты — Gazebo XYZ, метры, quaternion; service подтверждает существование каждой
+площадки в текущем `scene/info`. В `empty` `landing_pad_01` и `landing_pad_02` стоят
+на X=-3 м и X=+3 м. Spawn-frame расположен на Z=0,292 м: коллизии исходного
+`x500_gimbal` оставляют шасси на верхней поверхности 0,3 м с зазором 5 мм.
+Площадки не обнаруживаются как runtime-дроны. Некорректные frames, ссылки, геометрия
+или отсутствие хотя бы одной площадки блокируют старт Gazebo Service.
+
+Внутренний `POST /api/v1/drones/` сохраняет контракт `model`, `name`, `pose`.
+Выбор и эксклюзивное владение площадкой принадлежат публичному Backend.
 
 ## Запросы и текущие данные
 

@@ -17,6 +17,7 @@ from app.media.encoder import EncoderSession
 from app.services.subscriptions import SensorSubscription
 from app.gazebo.state import SerializedStepMap, component_id, decode_world, model_sdf
 from app.catalog import ModelCatalog
+from app.spawn_pads import read_spawn_pads
 from app.config import LOCAL_ROOT, Settings
 from gz.msgs10.physics_pb2 import Physics
 
@@ -39,6 +40,36 @@ def test_default_world_and_flight_models_are_bundled_in_application():
         models["x500_gimbal"], "imu_sensor"
     ) == 250
     assert all(path.is_file() for path in (LOCAL_ROOT / "models/gimbal_camera/meshes").glob("*.stl"))
+
+
+def test_spawn_pad_frames_resolve_world_surface_and_drone_poses():
+    pads = read_spawn_pads(LOCAL_ROOT / "worlds/empty.sdf", "empty", (LOCAL_ROOT / "models",))
+    assert [pad["id"] for pad in pads] == ["landing_pad_01", "landing_pad_02"]
+    assert pads[0]["pose"]["position"] == {"x": -3.0, "y": 0.0, "z": 0.0}
+    assert pads[0]["surface_pose"]["position"]["z"] == .3
+    assert pads[0]["spawn_pose"]["position"] == {"x": -3.0, "y": 0.0, "z": .292}
+    assert pads[0]["supported_models"] == ["x500_gimbal"]
+    assert pads[0]["size"] == {"x": 2.5, "y": 2.5, "z": .3}
+
+
+def test_spawn_pad_frames_follow_pad_yaw_and_reject_incomplete_world(tmp_path):
+    source = (LOCAL_ROOT / "worlds/empty.sdf").read_text()
+    source = source.replace("-3 0 0 0 0 0", "-3 0 0 0 0 1.5707963267948966")
+    path = tmp_path / "yaw.sdf"
+    path.write_text(source)
+    pads = read_spawn_pads(path, "empty", (LOCAL_ROOT / "models",))
+    pad = pads[0]
+    assert abs(pad["spawn_pose"]["position"]["x"] + 3) < 1e-8
+    assert abs(pad["spawn_pose"]["position"]["y"]) < 1e-8
+    assert abs(pad["spawn_pose"]["orientation"]["z"] - 2 ** -.5) < 1e-8
+    incomplete = source.replace('''    <frame name="spawn_pad__landing_pad_01" attached_to="landing_pad_01">
+      <pose relative_to="landing_pad_01">0 0 0.292 0 0 0</pose>
+    </frame>
+''', "", 1)
+    incomplete_path = tmp_path / "incomplete.sdf"
+    incomplete_path.write_text(incomplete)
+    with pytest.raises(ValueError, match="exactly one"):
+        read_spawn_pads(incomplete_path, "empty", (LOCAL_ROOT / "models",))
     from app.gazebo.world import _load_bindings
     # Gazebo Harmonic air pressure publishers use FluidPressure on Transport.
     bindings = _load_bindings()

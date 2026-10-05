@@ -14,6 +14,20 @@ log = logging.getLogger("gazebo-service")
 from .base import ServiceContext
 
 class WorldOperations(ServiceContext):
+    def spawn_pad_catalog(self):
+        """Return configured spawn frames and require their models to exist in Gazebo."""
+        self._ensure_ready()
+        names = {model.name for model in self._scene().model}
+        pads = []
+        for configured in self.spawn_pads:
+            pad = configured.copy()
+            pad["available"] = pad["id"] in names
+            if not pad["available"]:
+                pad["unavailable_reason"] = "spawn_pad_missing_from_gazebo_scene"
+            pads.append(pad)
+        return {"world": self.settings.world_name, "world_generation": self.generation,
+                "coordinate_system": "gazebo_xyz_z_up", "units": "meters", "pads": pads}
+
     @serialized
     def world_info(self):
         scene = self._scene()
