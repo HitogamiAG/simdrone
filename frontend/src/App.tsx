@@ -10,8 +10,9 @@ import './App.css'
 import MapView, { type MapManifest } from './MapView'
 import { worldGlbUrl, worldManifestUrl } from './mapAssets'
 import { realtimeClient, type RealtimeEnvelope } from './realtime'
+import TelemetryPanel from './TelemetryPanel'
 
-type Resource = { id: string; name: string; spawn_pad_id?: string; status?: string; simulation?: { pose?: { position?: { x: number; y: number; z: number }; orientation?: { x: number; y: number; z: number; w: number } } }; [key: string]: unknown }
+type Resource = { id: string; name: string; spawn_pad_id?: string; status?: string; binding?: { generation?: number }; simulation?: { pose?: { position?: { x: number; y: number; z: number }; orientation?: { x: number; y: number; z: number; w: number } } }; [key: string]: unknown }
 type SpawnPad = { id: string; name: string; model: string; availability: 'available' | 'occupied' | 'unavailable'; assigned_drone_id: string | null; unavailable_reason: string | null; surface_pose: { position: { x: number; y: number; z: number } }; spawn_pose: { position: { x: number; y: number; z: number }; orientation: { x: number; y: number; z: number; w: number } }; supported_models: string[] }
 type SpawnPadCatalog = { world: string; world_generation: number; coordinate_system: string; units: string; pads: SpawnPad[] }
 type FloatingWindow = { id: string; drone: string; kind: 'telemetry' | 'video' | 'logs' | 'manual'; minimized: boolean; x: number; y: number; width: number; height: number; z: number }
@@ -50,6 +51,7 @@ function Workbench() {
   const [focusWorld, setFocusWorld] = useState(true)
   const [layers, setLayers] = useState({ drones: true, routes: true, pads: true, grid: true })
   const [poses, setPoses] = useState<Record<string, RealtimeEnvelope>>({})
+  const [telemetry, setTelemetry] = useState<Record<string, Record<string, RealtimeEnvelope>>>({})
   const { selectedDrone, setSelectedDrone, view, setView, windows, openWindow, patchWindow, closeWindow } = useWorkspace()
   const status = useQuery({ queryKey: ['status'], queryFn: () => get<Record<string, unknown>>('/api/v1/system/status'), ...queryOptions })
   const world = useQuery({ queryKey: ['world'], queryFn: () => get<Record<string, unknown>>('/api/v1/world'), ...queryOptions })
@@ -62,10 +64,12 @@ function Workbench() {
 
   const droneRows = useMemo(() => Array.isArray(drones.data) ? drones.data : [], [drones.data])
   const missionRows = useMemo(() => Array.isArray(missions.data) ? missions.data : [], [missions.data])
-  const droneIds = droneRows.map((drone) => drone.id).join('\u0000')
+  const poseDroneKeys = droneRows.filter((drone) => !['creating', 'resetting', 'deleting', 'failed'].includes(drone.status ?? '')).map((drone) => [drone.id, drone.binding?.generation ?? null] as const)
+  const poseDroneIds = JSON.stringify(poseDroneKeys)
   useEffect(() => {
-    const ids = droneIds ? droneIds.split('\u0000') : []
-    const cleanups = ids.map((id) => realtimeClient.subscribe(`drone.${id}.pose`, (envelope) => {
+    const entries = JSON.parse(poseDroneIds) as Array<[string, number | null]>
+    const cleanups = entries.map(([id, generation]) => realtimeClient.subscribe(`drone.${id}.pose`, (envelope) => {
+      if (generation !== null && envelope.runtime_generation !== undefined && envelope.runtime_generation !== generation) return
       if (envelope.type === 'invalidated' || envelope.type === 'error') {
         setPoses((current) => { const next = { ...current }; delete next[id]; return next })
         return
@@ -73,7 +77,24 @@ function Workbench() {
       setPoses((current) => ({ ...current, [id]: envelope }))
     }))
     return () => cleanups.forEach((cleanup) => cleanup())
-  }, [droneIds])
+  }, [poseDroneIds])
+  const telemetryDroneIds = JSON.stringify([...new Set(windows.filter((item) => item.kind === 'telemetry').map((item) => item.drone))].flatMap((id) => {
+    const drone = droneRows.find((item) => item.id === id)
+    return drone && !['creating', 'resetting', 'deleting', 'failed'].includes(drone.status ?? '') ? [[id, drone.binding?.generation ?? null] as const] : []
+  }))
+  useEffect(() => {
+    const entries = JSON.parse(telemetryDroneIds) as Array<[string, number | null]>
+    const cleanups = entries.map(([id, generation]) => realtimeClient.subscribe(`drone.${id}.telemetry`, (envelope) => {
+      if (generation !== null && envelope.runtime_generation !== undefined && envelope.runtime_generation !== generation) return
+      if (envelope.type === 'invalidated' || envelope.type === 'error') {
+        setTelemetry((current) => { const next = { ...current }; delete next[id]; return next })
+        return
+      }
+      const sampleType = String(envelope.data?.type ?? envelope.type)
+      setTelemetry((current) => ({ ...current, [id]: { ...current[id], [sampleType]: envelope } }))
+    }))
+    return () => cleanups.forEach((cleanup) => cleanup())
+  }, [telemetryDroneIds])
   const servicesOk = status.isSuccess && !status.isError
   const padRows = spawnPads.data?.pads ?? []
   const selectedPad = padRows.find((pad) => pad.id === selectedPadId) ?? null
@@ -82,8 +103,14 @@ function Workbench() {
   const localMatchesBackend = Boolean(localMap.data && map.data?.available && localMap.data.package_id === map.data.package_id && localMap.data.version === map.data.version && localMap.data.world_name === map.data.world_name && localMap.data.coordinate_system === map.data.coordinate_system)
   const mapReady = localMatchesBackend && localGlb.isSuccess
   const focusedDrone = droneRows.find((drone) => drone.id === selectedDrone)
-  const selectedPose = selectedDrone ? poses[selectedDrone]?.data : undefined
-  const mapDrones = useMemo(() => droneRows.map((drone) => ({ ...drone, simulation: { ...drone.simulation, pose: (poses[drone.id]?.data?.pose as NonNullable<Resource['simulation']>['pose']) ?? drone.simulation?.pose } })), [droneRows, poses])
+  const selectedPoseEnvelope = selectedDrone ? poses[selectedDrone] : undefined
+  const selectedPoseCurrent = selectedPoseEnvelope && (focusedDrone?.binding?.generation === undefined || selectedPoseEnvelope.runtime_generation === focusedDrone.binding.generation)
+  const selectedPose = selectedPoseCurrent ? selectedPoseEnvelope?.data?.pose as NonNullable<Resource['simulation']>['pose'] : focusedDrone?.simulation?.pose
+  const mapDrones = useMemo(() => droneRows.map((drone) => {
+    const realtimePose = poses[drone.id]
+    const poseIsCurrent = realtimePose && (drone.binding?.generation === undefined || realtimePose.runtime_generation === drone.binding.generation)
+    return { ...drone, simulation: { ...drone.simulation, pose: poseIsCurrent ? realtimePose.data?.pose as NonNullable<Resource['simulation']>['pose'] : drone.simulation?.pose } }
+  }), [droneRows, poses])
   const droneFocus = focusedDrone ? mapDrones.find((drone) => drone.id === focusedDrone.id)?.simulation?.pose?.position : undefined
   const cameraFocus: [number, number, number] = !focusWorld && droneFocus ? [droneFocus.x, droneFocus.y, droneFocus.z] : [0, 0, 0]
 
@@ -179,12 +206,12 @@ function Workbench() {
         </div>
         {mapReady && localMap.data && <MapView view={view} zoom={mapZoom} focus={cameraFocus} follow={viewFollow} manifest={localMap.data} pads={padRows} drones={mapDrones} selectedDrone={selectedDrone} showPads={layers.pads} showDrones={layers.drones} showGrid={layers.grid} onSelectDrone={(drone) => { setSelectedDrone(drone.id); setFocusWorld(false); setDroneMenu(null) }} onSelectPad={(pad) => { setSelectedPadId(pad.id); setFocusWorld(false); setCreateDroneError(null); setPadPickerMode(false); droneModal.open() }} onDroneContext={(drone, x, y) => { setSelectedDrone(drone.id); setFocusWorld(false); setDroneMenu({ id: drone.id, x, y }) }} onPointerMissed={() => { if (padPickerMode) { setPadPickerMode(false); droneModal.open() } }} />}
         {!mapReady && <div className="map-prerequisite"><IconMap2 size={34} stroke={1.4} /><Text fw={600} mt="md">{map.isError || localMap.isError || localGlb.isError ? 'Не удалось загрузить пакет участка' : map.data?.available && !localMatchesBackend ? 'Пакет карты не совпадает с Backend' : map.data?.available ? 'Загрузка модели участка…' : 'Пакет участка не подключён'}</Text><Text size="sm" c="dimmed" ta="center" maw={440}>{map.isError || localMap.isError || localGlb.isError ? 'Проверьте локальную поставку world.glb/manifest и доступность Backend.' : map.data?.available && !localMatchesBackend ? `Backend: ${String(map.data.package_id)} ${String(map.data.version)}; браузер: ${localMap.data?.package_id ?? 'manifest недоступен'} ${localMap.data?.version ?? ''}.` : 'Карта появится после загрузки локального Blender-пакета и сверки его версии с Backend.'}</Text><Badge variant="outline" color="yellow" mt="sm">Карта и управление полётом заблокированы</Badge></div>}
-        {selectedDrone && <div className="selected-drone-chip"><span className="drone-dot" /><div><Text size="sm" fw={600}>Выбранный дрон</Text><Text size="xs" c="dimmed">{selectedDrone} · {poses[selectedDrone] ? `обновлено ${String(poses[selectedDrone].data?.age_s ?? '—')} с назад` : 'ожидание позы'}</Text></div><ActionIcon variant="subtle" aria-label="Открыть телеметрию" onClick={() => openWindow(selectedDrone, 'telemetry')}><IconActivity size={16} /></ActionIcon></div>}
-        <div className="coordinate-readout">XYZ Gazebo · м <span>{formatPosition(selectedPose?.pose && typeof selectedPose.pose === 'object' ? selectedPose.pose as Resource['simulation'] extends { pose?: infer P } ? P : never : null)}</span></div>
+        {selectedDrone && <div className="selected-drone-chip"><span className="drone-dot" /><div><Text size="sm" fw={600}>Выбранный дрон</Text><Text size="xs" c="dimmed">{selectedDrone} · {selectedPoseCurrent ? `обновлено ${String(selectedPoseEnvelope?.data?.age_s ?? '—')} с назад` : 'ожидание позы'}</Text></div><ActionIcon variant="subtle" aria-label="Открыть телеметрию" onClick={() => openWindow(selectedDrone, 'telemetry')}><IconActivity size={16} /></ActionIcon></div>}
+        <div className="coordinate-readout">XYZ Gazebo · м <span>{formatPosition(selectedPose ?? null)}</span></div>
         {padPickerMode && <div className="map-pick-hint" onClick={(event) => event.stopPropagation()}>Выберите площадку на карте <Button size="compact-xs" variant="subtle" onClick={() => { setPadPickerMode(false); droneModal.open() }}>Отмена</Button></div>}
         {droneMenu && <div className="drone-context-menu" style={{ left: Math.min(droneMenu.x, window.innerWidth - 220), top: Math.min(droneMenu.y, window.innerHeight - 230) }} onClick={(event) => event.stopPropagation()}><Text size="xs" c="dimmed">Действия · {droneRows.find((drone) => drone.id === droneMenu.id)?.name ?? droneMenu.id}</Text>{(['telemetry', 'video', 'logs', 'manual'] as const).map((kind) => <Button key={kind} variant="subtle" size="xs" fullWidth onClick={() => { openWindow(droneMenu.id, kind); setDroneMenu(null) }}>{windowTitle[kind]}</Button>)}{(['RTL', 'Посадка', 'Настройки', 'Reset', 'Удалить'] as const).map((label) => <Button key={label} variant="subtle" size="xs" fullWidth disabled title="Действие ещё не подключено">{label}</Button>)}</div>}
         <div className="floating-windows">{windows.map((window) => <Rnd key={window.id} bounds="parent" minWidth={window.kind === 'manual' ? 400 : 300} minHeight={window.kind === 'manual' ? 380 : 220} size={{ width: window.width, height: window.minimized ? 42 : window.height }} position={{ x: window.x, y: window.y }} style={{ zIndex: window.z }} onDragStop={(_, data) => patchWindow(window.id, { x: data.x, y: data.y })} onResizeStop={(_, __, ref, ___, position) => patchWindow(window.id, { width: ref.offsetWidth, height: ref.offsetHeight, ...position })} onMouseDown={() => patchWindow(window.id, { z: Math.max(0, ...windows.map((item) => item.z)) + 1 })} dragHandleClassName="window-titlebar">
-            <div className="floating-window"><header className="window-titlebar"><div><Text size="sm" fw={600}>{windowTitle[window.kind]}</Text><Text size="xs" c="dimmed">{window.drone}</Text></div><Group gap={4}><ActionIcon size="sm" variant="subtle" aria-label="Свернуть окно" onClick={() => patchWindow(window.id, { minimized: !window.minimized })}>{window.minimized ? <IconMaximize size={14} /> : <IconMinus size={14} />}</ActionIcon><ActionIcon size="sm" variant="subtle" aria-label="Закрыть окно" onClick={() => closeWindow(window.id)}><IconX size={14} /></ActionIcon></Group></header>{!window.minimized && <div className="window-content">{window.kind === 'video' ? <div className="video-placeholder"><IconVideo /><Text size="sm" c="dimmed">Видео подключается через WHEP</Text></div> : window.kind === 'logs' ? <Text size="sm" c="dimmed">Ожидание сообщений…</Text> : window.kind === 'manual' ? <Text size="sm" c="dimmed">Захват управления · WASD / RF / QE</Text> : <><Text size="xs" c="dimmed">ПОЗА GAZEBO</Text><Text size="sm">{poses[window.drone] ? JSON.stringify(poses[window.drone].data?.pose ?? poses[window.drone].data) : 'Ожидание свежего образца'}</Text></>}</div>}</div>
+            <div className="floating-window"><header className="window-titlebar"><div><Text size="sm" fw={600}>{windowTitle[window.kind]}</Text><Text size="xs" c="dimmed">{window.drone}</Text></div><Group gap={4}><ActionIcon size="sm" variant="subtle" aria-label="Свернуть окно" onClick={() => patchWindow(window.id, { minimized: !window.minimized })}>{window.minimized ? <IconMaximize size={14} /> : <IconMinus size={14} />}</ActionIcon><ActionIcon size="sm" variant="subtle" aria-label="Закрыть окно" onClick={() => closeWindow(window.id)}><IconX size={14} /></ActionIcon></Group></header>{!window.minimized && <div className="window-content">{window.kind === 'video' ? <div className="video-placeholder"><IconVideo /><Text size="sm" c="dimmed">Видео подключается через WHEP</Text></div> : window.kind === 'logs' ? <Text size="sm" c="dimmed">Ожидание сообщений…</Text> : window.kind === 'manual' ? <Text size="sm" c="dimmed">Захват управления · WASD / RF / QE</Text> : <TelemetryPanel pose={poses[window.drone]?.runtime_generation === droneRows.find((drone) => drone.id === window.drone)?.binding?.generation ? poses[window.drone] : undefined} samples={Object.fromEntries(Object.entries(telemetry[window.drone] ?? {}).filter(([, sample]) => sample.runtime_generation === droneRows.find((drone) => drone.id === window.drone)?.binding?.generation))} />}</div>}</div>
           </Rnd>)}</div>
         <div className="window-dock">{windows.map((window) => <Button key={window.id} size="xs" variant="default" onClick={() => patchWindow(window.id, { minimized: false, z: Math.max(...windows.map((item) => item.z)) + 1 })}>{windowTitle[window.kind]} · {window.drone}</Button>)}</div>
       </section>

@@ -15,6 +15,9 @@ type Listener = (message: RealtimeEnvelope) => void
 export class RealtimeClient {
   private socket: WebSocket | null = null
   private readonly listeners = new Map<string, Set<Listener>>()
+  private readonly retryTimers = new Map<string, number>()
+  private readonly retryCounts = new Map<string, number>()
+  private readonly subscribed = new Set<string>()
   private retryTimer: number | undefined
   private stopped = false
 
@@ -34,6 +37,11 @@ export class RealtimeClient {
       current.delete(listener)
       if (current.size) return
       this.listeners.delete(channel)
+      const timer = this.retryTimers.get(channel)
+      if (timer !== undefined) window.clearTimeout(timer)
+      this.retryTimers.delete(channel)
+      this.retryCounts.delete(channel)
+      this.subscribed.delete(channel)
       if (this.socket?.readyState === WebSocket.OPEN) {
         this.socket.send(JSON.stringify({ action: 'unsubscribe', channels: [channel] }))
       }
@@ -48,6 +56,7 @@ export class RealtimeClient {
     this.socket = socket
     socket.onopen = () => {
       if (this.socket !== socket) return
+      this.subscribed.clear()
       const channels = [...this.listeners.keys()]
       if (channels.length) socket.send(JSON.stringify({ action: 'subscribe', channels }))
     }
@@ -55,20 +64,52 @@ export class RealtimeClient {
       let message: RealtimeEnvelope
       try { message = JSON.parse(event.data) as RealtimeEnvelope } catch { return }
       if (!message.channel) return
+      if (message.type === 'subscribed') {
+        this.subscribed.add(message.channel)
+        this.retryCounts.delete(message.channel)
+        const timer = this.retryTimers.get(message.channel)
+        if (timer !== undefined) window.clearTimeout(timer)
+        this.retryTimers.delete(message.channel)
+        return
+      }
       for (const listener of this.listeners.get(message.channel) ?? []) listener(message)
+      if (message.type === 'invalidated' || message.type === 'error') this.retryChannel(message.channel)
     }
     socket.onclose = () => {
       if (this.socket !== socket) return
       this.socket = null
+      this.subscribed.clear()
       if (!this.stopped && this.listeners.size) this.retryTimer = window.setTimeout(() => this.ensureConnected(), 1500)
     }
     socket.onerror = () => socket.close()
+  }
+
+  private retryChannel(channel: string) {
+    if (!this.listeners.has(channel) || this.retryTimers.has(channel)) return
+    this.subscribed.delete(channel)
+    const attempt = (this.retryCounts.get(channel) ?? 0) + 1
+    this.retryCounts.set(channel, attempt)
+    const delay = Math.min(750 * 2 ** Math.min(attempt - 1, 4), 12_000)
+    const timer = window.setTimeout(() => {
+      this.retryTimers.delete(channel)
+      if (!this.listeners.has(channel)) return
+      if (this.socket?.readyState === WebSocket.OPEN) {
+        this.socket.send(JSON.stringify({ action: 'subscribe', channels: [channel] }))
+      } else {
+        this.ensureConnected()
+      }
+    }, delay)
+    this.retryTimers.set(channel, timer)
   }
 
   private disconnect() {
     this.stopped = true
     if (this.retryTimer !== undefined) window.clearTimeout(this.retryTimer)
     this.retryTimer = undefined
+    for (const timer of this.retryTimers.values()) window.clearTimeout(timer)
+    this.retryTimers.clear()
+    this.retryCounts.clear()
+    this.subscribed.clear()
     const socket = this.socket
     this.socket = null
     socket?.close()

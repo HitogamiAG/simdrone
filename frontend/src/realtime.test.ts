@@ -18,7 +18,7 @@ class MockSocket {
   emit(message: unknown) { this.onmessage?.({ data: JSON.stringify(message) }) }
 }
 
-afterEach(() => { vi.unstubAllGlobals(); MockSocket.instances = [] })
+afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); MockSocket.instances = [] })
 
 describe('RealtimeClient', () => {
   it('shares one socket, reference-counts a channel and routes envelopes by channel', () => {
@@ -27,6 +27,7 @@ describe('RealtimeClient', () => {
     const first = vi.fn()
     const second = vi.fn()
     const other = vi.fn()
+    vi.useFakeTimers()
     const removeFirst = client.subscribe('drone.a.pose', first)
     const socket = MockSocket.instances[0]
     socket.open()
@@ -36,15 +37,20 @@ describe('RealtimeClient', () => {
     const removeOther = client.subscribe('drone.b.pose', other)
     expect(MockSocket.instances).toHaveLength(1)
     expect(JSON.parse(socket.sent[1])).toEqual({ action: 'subscribe', channels: ['drone.b.pose'] })
+    socket.emit({ type: 'subscribed', channel: 'drone.a.pose' })
+    expect(first).not.toHaveBeenCalled()
     socket.emit({ type: 'pose', channel: 'drone.a.pose', data: { pose: {} } })
     expect(first).toHaveBeenCalledTimes(1)
     expect(second).toHaveBeenCalledTimes(1)
     expect(other).not.toHaveBeenCalled()
+    socket.emit({ type: 'invalidated', channel: 'drone.a.pose' })
+    expect(first.mock.lastCall?.[0]).toMatchObject({ type: 'invalidated' })
+    vi.advanceTimersByTime(750)
+    expect(JSON.parse(socket.sent[2])).toEqual({ action: 'subscribe', channels: ['drone.a.pose'] })
 
     removeFirst()
-    expect(socket.sent.map((entry) => JSON.parse(entry))).toHaveLength(2)
     removeSecond()
-    expect(JSON.parse(socket.sent[2])).toEqual({ action: 'unsubscribe', channels: ['drone.a.pose'] })
+    expect(JSON.parse(socket.sent[3])).toEqual({ action: 'unsubscribe', channels: ['drone.a.pose'] })
     removeOther()
     expect(socket.readyState).toBe(3)
   })
