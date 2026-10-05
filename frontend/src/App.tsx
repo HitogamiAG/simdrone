@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Accordion, ActionIcon, Badge, Button, Group, Modal, NumberInput, Select, Stack, Text, TextInput, Tooltip, MantineProvider } from '@mantine/core'
 import { useDisclosure } from '@mantine/hooks'
-import { Notifications } from '@mantine/notifications'
+import { Notifications, notifications } from '@mantine/notifications'
 import { IconActivity, IconAntennaBars5, IconChevronLeft, IconChevronRight, IconCirclePlus, IconDrone, IconMap2, IconMaximize, IconMinus, IconPlayerPause, IconPlayerPlay, IconRefresh, IconRoute, IconSettings, IconVideo, IconX } from '@tabler/icons-react'
 import { Rnd } from 'react-rnd'
 import { useQuery } from '@tanstack/react-query'
@@ -75,6 +75,20 @@ function Workbench() {
     await drones.refetch(); droneModal.close(); setPositionMode(false)
   }
 
+  const setSimulation = async (action: 'pause' | 'resume') => {
+    try {
+      const response = await fetch(`/api/v1/world/${action}`, { method: 'POST' })
+      if (!response.ok) {
+        notifications.show({ color: 'red', title: 'Операция не принята', message: `Не удалось изменить состояние симуляции (${response.status}).` })
+        return
+      }
+      await world.refetch()
+      notifications.show({ color: 'green', title: 'Команда принята', message: 'Проверьте состояние симуляции после обновления.' })
+    } catch {
+      notifications.show({ color: 'red', title: 'Backend недоступен', message: 'Состояние симуляции не подтверждено.' })
+    }
+  }
+
   const windowTitle: Record<FloatingWindow['kind'], string> = { telemetry: 'Телеметрия', video: 'Видео', logs: 'Логи', manual: 'Ручное управление' }
   return <div className="app-shell">
     <aside className={`control-panel ${collapsed ? 'is-collapsed' : ''}`}>
@@ -99,15 +113,15 @@ function Workbench() {
               {!droneRows.length && !drones.isLoading && !drones.isError && <EmptyHint text="В мире пока нет дронов" />}
             </Accordion.Panel></Accordion.Item>
             <Accordion.Item value="missions"><Accordion.Control icon={<IconRoute size={17} />}>Миссии <span className="count">{missionRows.length}</span></Accordion.Control><Accordion.Panel>
-              <Group grow mb="sm"><Button size="xs" leftSection={<IconCirclePlus size={14} />} variant="light">Новая миссия</Button><Button size="xs" variant="default" onClick={() => void missions.refetch()}><IconRefresh size={14} /></Button></Group>
+              <Group grow mb="sm"><Button size="xs" disabled leftSection={<IconCirclePlus size={14} />} variant="light" title="Редактор миссий будет подключён после редактора карты">Новая миссия</Button><Button size="xs" variant="default" onClick={() => void missions.refetch()}><IconRefresh size={14} /></Button></Group>
               {missionRows.map((mission) => <div className="mission-row" key={mission.id}><IconRoute size={16} /><div className="resource-main"><Text size="sm" fw={500}>{mission.name || mission.id}</Text><Text size="xs" c="dimmed">{String(mission.revision ? `Редакция ${mission.revision}` : 'Сохранённая миссия')}</Text></div></div>)}
               {!missionRows.length && !missions.isError && <EmptyHint text="Выберите сохранённую миссию или создайте новую" />}
               {missions.isError && <InlineError message="Не удалось загрузить миссии" onRetry={() => void missions.refetch()} />}
               <Text size="xs" c="dimmed" mt="sm">Редактор маршрута появится после подключения пакета участка.</Text>
             </Accordion.Panel></Accordion.Item>
             <Accordion.Item value="world"><Accordion.Control icon={<IconSettings size={17} />}>Настройки мира</Accordion.Control><Accordion.Panel>
-              <Text size="sm" fw={600}>{String(world.data?.name ?? 'Gazebo')}</Text><Text size="xs" c="dimmed" mb="sm">{String(world.data?.state ?? 'Состояние недоступно')}</Text>
-              <Group grow><Button size="xs" variant="default" leftSection={<IconPlayerPause size={14} />}>Пауза</Button><Button size="xs" variant="default" leftSection={<IconPlayerPlay size={14} />}>Продолжить</Button></Group>
+              <Text size="sm" fw={600}>{String(world.data?.name ?? 'Gazebo')}</Text><Text size="xs" c="dimmed" mb="sm">{world.data?.simulation && typeof world.data.simulation === 'object' && 'paused' in world.data.simulation ? (world.data.simulation.paused ? 'Симуляция на паузе' : 'Симуляция выполняется') : 'Состояние недоступно'}</Text>
+              <Group grow><Button size="xs" variant="default" disabled={!servicesOk || Boolean((world.data?.simulation as { paused?: boolean } | undefined)?.paused)} leftSection={<IconPlayerPause size={14} />} onClick={() => void setSimulation('pause')}>Пауза</Button><Button size="xs" variant="default" disabled={!servicesOk || !(world.data?.simulation as { paused?: boolean } | undefined)?.paused} leftSection={<IconPlayerPlay size={14} />} onClick={() => void setSimulation('resume')}>Продолжить</Button></Group>
               <Text size="xs" c="dimmed" mt="sm">Сброс и перезапуск будут доступны с подтверждением.</Text>
             </Accordion.Panel></Accordion.Item>
           </Accordion>
