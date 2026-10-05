@@ -14,6 +14,7 @@ class Drone:
     name: str
     model: str
     pose: dict
+    spawn_pad_id: str
     gazebo_id: str | None = None
     gazebo_create_attempted: bool = False
     instance_id: str | None = None
@@ -44,6 +45,7 @@ class Platform:
             if configured_drones:
                 return {"ready": False, "reason": "configured_world_contains_drone",
                         "drones": [d.get("name") for d in configured_drones]}
+            await self.gazebo.spawn_pads()
             return {"ready": True, "world": world["name"]}
         except Exception as exc:
             return {"ready": False, "reason": str(exc)}
@@ -118,7 +120,8 @@ class Platform:
 
     def _serialize(self, item: Drone, gazebo=None, autopilot=None, *, gazebo_error=None, autopilot_error=None):
         flight_available = bool(autopilot and autopilot.get("status") == "running")
-        return {"id": item.id, "name": item.name, "model": item.model, "status": item.status,
+        return {"id": item.id, "name": item.name, "model": item.model,
+                "spawn_pad_id": item.spawn_pad_id, "initial_pose": item.pose, "status": item.status,
                 "simulation": {"drone_id": item.gazebo_id,
                                "pose": (gazebo or {}).get("pose") if item.gazebo_id else item.pose,
                                "entity_id": (gazebo or {}).get("entity_id"),
@@ -133,6 +136,33 @@ class Platform:
                 "capabilities": {"flight_control": flight_available, "missions": flight_available,
                                  "manual_control": flight_available},
                 "last_error": item.last_error}
+
+    async def spawn_pads(self):
+        catalog = await self.gazebo.spawn_pads()
+        owned = {item.spawn_pad_id: item.id for item in self.drones.values()}
+        try:
+            gazebo_drones, hub_instances = await asyncio.gather(self.gazebo.drones(), self.hub.instances())
+            managed_gazebo = {item.gazebo_id for item in self.drones.values() if item.gazebo_id}
+            managed_hub = {item.instance_id for item in self.drones.values() if item.instance_id}
+            unmanaged_gazebo = [item for item in gazebo_drones if item.get("id") not in managed_gazebo]
+            unmanaged_hub = [item for item in hub_instances if item.get("id") not in managed_hub]
+        except Exception:
+            unmanaged_gazebo, unmanaged_hub = ["state_unavailable"], ["state_unavailable"]
+        for pad in catalog.get("pads", []):
+            pad["assigned_drone_id"] = owned.get(pad["id"])
+            if unmanaged_gazebo or unmanaged_hub:
+                pad["availability"] = "unavailable"
+                pad["unavailable_reason"] = "unmanaged_runtime_resources"
+            elif not pad.get("available", True):
+                pad["availability"] = "unavailable"
+                pad["unavailable_reason"] = pad.get("unavailable_reason", "spawn_pad_unavailable")
+            elif pad["id"] in owned:
+                pad["availability"] = "occupied"
+                pad["unavailable_reason"] = None
+            else:
+                pad["availability"] = "available"
+                pad["unavailable_reason"] = None
+        return catalog
 
     async def list_drones(self):
         result = []
@@ -159,9 +189,24 @@ class Platform:
 
     async def create_drone(self, body):
         async with self.lock:
+            await self._running()
+            name = body.name or f"drone-{uuid.uuid4().hex[:8]}"
+            await self._assert_name_available(name)
+            catalog = await self.spawn_pads()
+            pad = next((value for value in catalog.get("pads", []) if value["id"] == body.spawn_pad_id), None)
+            if pad is None:
+                raise BackendError(404, "spawn_pad_not_found", "Spawn pad was not found",
+                                   {"spawn_pad_id": body.spawn_pad_id})
+            if pad["availability"] == "occupied":
+                raise BackendError(409, "spawn_pad_occupied", "Spawn pad is assigned to another drone",
+                                   {"spawn_pad_id": body.spawn_pad_id, "assigned_drone_id": pad["assigned_drone_id"]})
+            if pad["availability"] != "available" or body.model not in pad.get("supported_models", []):
+                raise BackendError(409, "spawn_pad_unavailable", "Spawn pad is unavailable for this drone",
+                                   {"spawn_pad_id": body.spawn_pad_id,
+                                    "reason": pad.get("unavailable_reason", "unsupported_model")})
+            item = Drone(str(uuid.uuid4()), name, body.model,
+                         pad["spawn_pose"], body.spawn_pad_id)
             self.operation = "create_drone"
-            item = Drone(str(uuid.uuid4()), body.name or f"drone-{uuid.uuid4().hex[:8]}", body.model,
-                         body.pose.model_dump())
             self.drones[item.id] = item
             gazebo = None
             try:

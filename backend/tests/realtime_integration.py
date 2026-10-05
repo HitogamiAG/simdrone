@@ -27,7 +27,7 @@ async def main():
         try:
             response = await client.post(BACKEND + "/api/v1/drones/", json={
                 "model": "x500_gimbal", "name": f"realtime_it_{int(time.time())}",
-                "pose": {"position": {"x": 1, "y": 0, "z": 3}},
+                "spawn_pad_id": "landing_pad_01",
             })
             response.raise_for_status()
             drone_id = response.json()["id"]

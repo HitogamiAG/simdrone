@@ -20,8 +20,7 @@ def main():
         assert request(client, "GET", "/system/status")["backend"]["ready"]
         created = request(client, "POST", "/drones/", json={
             "model": "x500_gimbal", "name": f"backend_it_{int(time.time())}",
-            "pose": {"position": {"x": 0, "y": 0, "z": 3},
-                     "orientation": {"x": 0, "y": 0, "z": 0, "w": 1}},
+            "spawn_pad_id": "landing_pad_01",
         })
         did = created["id"]
         assert created["status"] == "ready" and created["simulation"]["pose"]
@@ -55,7 +54,7 @@ def main():
 
         second = request(client, "POST", "/drones/", json={
             "model": "x500_gimbal", "name": f"backend_it_second_{int(time.time())}",
-            "pose": {"position": {"x": 2, "y": 0, "z": 3}},
+            "spawn_pad_id": "landing_pad_02",
         })
         second_id = second["id"]
         assert second["autopilot"]["px4"]["telemetry_fresh"]
@@ -70,7 +69,7 @@ def main():
         assert request(client, "GET", f"/drones/{second_id}/")["autopilot"]["px4"]["telemetry_fresh"]
 
         request(client, "POST", "/world/pause")
-        denied = client.post(BASE + "/drones/", json={"model": "x500_gimbal"}, timeout=10)
+        denied = client.post(BASE + "/drones/", json={"model": "x500_gimbal", "spawn_pad_id": "landing_pad_02"}, timeout=10)
         assert denied.status_code == 409 and denied.json()["error"]["code"] == "simulation_paused"
         request(client, "POST", "/world/resume")
 

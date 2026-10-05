@@ -35,6 +35,7 @@ class ServiceApi:
 
 class GazeboApi(ServiceApi):
     async def world(self): return await self.call("GET", "/api/v1/world")
+    async def spawn_pads(self): return await self.call("GET", "/api/v1/world/spawn-pads")
     async def drones(self): return await self.call("GET", "/api/v1/drones/")
     async def drone(self, drone_id): return await self.call("GET", f"/api/v1/drones/{drone_id}/", missing="drone_not_found")
     async def create_drone(self, body): return await self.call("POST", "/api/v1/drones/", json=body)

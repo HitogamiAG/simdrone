@@ -206,6 +206,10 @@ async def reboot(request: Request): return await request.app.state.platform.rese
 async def world(request: Request): return await request.app.state.platform.gazebo.world()
 
 
+@router.get("/api/v1/world/spawn-pads")
+async def spawn_pads(request: Request): return await request.app.state.platform.spawn_pads()
+
+
 @router.patch("/api/v1/world")
 async def patch_world(body: WorldPatch, request: Request):
     return await request.app.state.platform.patch_world(body.model_dump(exclude_unset=True))

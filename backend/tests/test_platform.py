@@ -23,9 +23,22 @@ class Gazebo:
                       "simulation": {"paused": False}, "models": []}
         self.calls = []
         self.timeline = None
+        self.pad_catalog = {"world": "empty", "world_generation": 0,
+            "coordinate_system": "gazebo_xyz_z_up", "units": "meters", "pads": [
+                {"id": "landing_pad_01", "name": "landing_pad_01", "model": "drone_pad",
+                 "pose": {"position": {"x": -3, "y": 0, "z": 0}, "orientation": {"x": 0, "y": 0, "z": 0, "w": 1}},
+                 "surface_pose": {"position": {"x": -3, "y": 0, "z": .3}, "orientation": {"x": 0, "y": 0, "z": 0, "w": 1}},
+                 "spawn_pose": {"position": {"x": -3, "y": 0, "z": .292}, "orientation": {"x": 0, "y": 0, "z": 0, "w": 1}},
+                 "size": {"x": 2.5, "y": 2.5, "z": .3}, "supported_models": ["x500_gimbal"], "available": True},
+                {"id": "landing_pad_02", "name": "landing_pad_02", "model": "drone_pad",
+                 "pose": {"position": {"x": 3, "y": 0, "z": 0}, "orientation": {"x": 0, "y": 0, "z": 0, "w": 1}},
+                 "surface_pose": {"position": {"x": 3, "y": 0, "z": .3}, "orientation": {"x": 0, "y": 0, "z": 0, "w": 1}},
+                 "spawn_pose": {"position": {"x": 3, "y": 0, "z": .292}, "orientation": {"x": 0, "y": 0, "z": 0, "w": 1}},
+                 "size": {"x": 2.5, "y": 2.5, "z": .3}, "supported_models": ["x500_gimbal"], "available": True}]}
 
     async def close(self): pass
     async def world(self): return self.state
+    async def spawn_pads(self): return json.loads(json.dumps(self.pad_catalog))
     async def drones(self): return list(self.items.values())
     async def create_drone(self, body):
         self.next_id += 1
@@ -80,7 +93,7 @@ def platform():
 def test_openapi_hides_pose_patch_and_exposes_platform_api():
     schema = app.openapi()["paths"]
     assert "patch" not in schema["/api/v1/drones/{drone_id}/"]
-    for path in ("/api/v1/system/status", "/api/v1/world/reset",
+    for path in ("/api/v1/system/status", "/api/v1/world/reset", "/api/v1/world/spawn-pads",
                  "/api/v1/drones/{drone_id}/autopilot/start",
                  "/api/v1/drones/{drone_id}/sensors/{sensor_id}/video"):
         assert path in schema
@@ -89,7 +102,7 @@ def test_openapi_hides_pose_patch_and_exposes_platform_api():
 def test_world_patch_resets_drones_then_applies_merged_settings():
     async def run():
         p = platform()
-        item = await p.create_drone(DroneCreate(name="one"))
+        item = await p.create_drone(DroneCreate(name="one", spawn_pad_id="landing_pad_01"))
         previous = item["id"]
         body = {"physics": {"max_step_size": .01}}
         result = await p.patch_world(body)
@@ -103,10 +116,76 @@ def test_world_patch_resets_drones_then_applies_merged_settings():
     asyncio.run(run())
 
 
+def test_spawn_pad_is_exclusive_until_confirmed_delete_and_survives_reset():
+    async def run():
+        p = platform()
+        results = await asyncio.gather(
+            p.create_drone(DroneCreate(name="pad_race_a", spawn_pad_id="landing_pad_01")),
+            p.create_drone(DroneCreate(name="pad_race_b", spawn_pad_id="landing_pad_01")),
+            return_exceptions=True)
+        created = [value for value in results if isinstance(value, dict)]
+        denied = [value for value in results if isinstance(value, BackendError)]
+        assert len(created) == len(denied) == 1
+        assert denied[0].code == "spawn_pad_occupied"
+        item = p._record(created[0]["id"])
+        original = item.pose.copy()
+        await p.reset_drone(item.id)
+        assert item.spawn_pad_id == "landing_pad_01" and item.pose == original
+        assert (await p.spawn_pads())["pads"][0]["availability"] == "occupied"
+        await p.delete_drone(item.id)
+        assert (await p.spawn_pads())["pads"][0]["availability"] == "available"
+
+    asyncio.run(run())
+
+
+def test_unmanaged_gazebo_or_hub_resources_make_spawn_pads_unavailable():
+    async def run():
+        p = platform()
+        p.gazebo.items["gz-orphan"] = {"id": "gz-orphan", "name": "manual_spawn", "model": "x500_gimbal"}
+        pads = await p.spawn_pads()
+        assert all(pad["availability"] == "unavailable" for pad in pads["pads"])
+        assert all(pad["unavailable_reason"] == "unmanaged_runtime_resources" for pad in pads["pads"])
+
+    asyncio.run(run())
+
+
+def test_spawn_pad_is_exclusive_until_confirmed_delete_and_survives_reset():
+    async def run():
+        p = platform()
+        results = await asyncio.gather(
+            p.create_drone(DroneCreate(name="pad_race_a", spawn_pad_id="landing_pad_01")),
+            p.create_drone(DroneCreate(name="pad_race_b", spawn_pad_id="landing_pad_01")),
+            return_exceptions=True)
+        created = [value for value in results if isinstance(value, dict)]
+        denied = [value for value in results if isinstance(value, BackendError)]
+        assert len(created) == len(denied) == 1
+        assert denied[0].code == "spawn_pad_occupied"
+        item = p._record(created[0]["id"])
+        original = item.pose.copy()
+        await p.reset_drone(item.id)
+        assert item.spawn_pad_id == "landing_pad_01" and item.pose == original
+        assert (await p.spawn_pads())["pads"][0]["availability"] == "occupied"
+        await p.delete_drone(item.id)
+        assert (await p.spawn_pads())["pads"][0]["availability"] == "available"
+
+    asyncio.run(run())
+
+
+def test_unmanaged_gazebo_or_hub_resources_make_spawn_pads_unavailable():
+    async def run():
+        p = platform()
+        p.gazebo.items["gz-orphan"] = {"id": "gz-orphan", "name": "manual_spawn", "model": "x500_gimbal"}
+        pads = await p.spawn_pads()
+        assert all(pad["availability"] == "unavailable" for pad in pads["pads"])
+        assert all(pad["unavailable_reason"] == "unmanaged_runtime_resources" for pad in pads["pads"])
+
+    asyncio.run(run())
+
+
 def test_sensor_patch_resets_px4_before_sensor_change_and_recreates():
     async def run():
         p = platform()
-        drone = await p.create_drone(DroneCreate(name="one"))
+        drone = await p.create_drone(DroneCreate(name="one", spawn_pad_id="landing_pad_01"))
         item = p._record(drone["id"])
         old_instance = item.instance_id
         await p.patch_sensor(item.id, "imu", {"update_rate": 20})
@@ -120,7 +199,7 @@ def test_sensor_patch_resets_px4_before_sensor_change_and_recreates():
 def test_world_reset_removes_unmapped_hub_instances_and_all_drones():
     async def run():
         p = platform()
-        await p.create_drone(DroneCreate(name="one"))
+        await p.create_drone(DroneCreate(name="one", spawn_pad_id="landing_pad_01"))
         p.startup_world_check = await p.ready()
         assert p.startup_world_check["reason"] == "configured_world_contains_drone"
         p.hub.items["orphan"] = "unknown"
@@ -128,7 +207,7 @@ def test_world_reset_removes_unmapped_hub_instances_and_all_drones():
         assert not p.hub.items and not p.gazebo.items and not p.drones
         assert p.world_generation == 1
         assert p.startup_world_check == {"ready": True, "world": "empty"}
-        assert (await p.create_drone(DroneCreate(name="after-reset")))["status"] == "ready"
+        assert (await p.create_drone(DroneCreate(name="after-reset", spawn_pad_id="landing_pad_01")))["status"] == "ready"
     asyncio.run(run())
 
 
@@ -139,7 +218,7 @@ def test_creation_compensates_instance_discovered_after_lost_response():
             p.hub.items["created-but-response-lost"] = drone_id
             raise BackendError(504, "timeout", "response timed out")
         p.hub.create = uncertain
-        with pytest.raises(BackendError): await p.create_drone(DroneCreate(name="one"))
+        with pytest.raises(BackendError): await p.create_drone(DroneCreate(name="one", spawn_pad_id="landing_pad_01"))
         assert not p.hub.items and not p.gazebo.items and not p.drones
     asyncio.run(run())
 
@@ -155,7 +234,7 @@ def test_creation_discovers_and_removes_gazebo_model_after_lost_response():
 
         p.gazebo.create_drone = uncertain
         with pytest.raises(BackendError):
-            await p.create_drone(DroneCreate(name="uncertain"))
+            await p.create_drone(DroneCreate(name="uncertain", spawn_pad_id="landing_pad_01"))
         assert not p.gazebo.items and not p.hub.items and not p.drones
 
     asyncio.run(run())
@@ -167,7 +246,7 @@ def test_duplicate_model_name_conflict_preserves_existing_model():
         existing = {"id": "gz-existing", "name": "taken", "model": "x500_gimbal"}
         p.gazebo.items[existing["id"]] = existing
         with pytest.raises(BackendError) as exc:
-            await p.create_drone(DroneCreate(name="taken"))
+            await p.create_drone(DroneCreate(name="taken", spawn_pad_id="landing_pad_01"))
         assert exc.value.code == "drone_name_conflict"
         assert p.gazebo.items == {existing["id"]: existing}
         assert not p.hub.items and not p.drones
@@ -188,7 +267,7 @@ def test_creation_cleanup_preserves_model_when_px4_presence_is_unknown():
         p.hub.create = create_then_lose_response
         p.hub.delete = failed_delete
         with pytest.raises(BackendError):
-            await p.create_drone(DroneCreate(name="preserve-on-unknown"))
+            await p.create_drone(DroneCreate(name="preserve-on-unknown", spawn_pad_id="landing_pad_01"))
         assert len(p.gazebo.items) == 1
         retained = next(iter(p.drones.values()))
         assert retained.status == "failed" and retained.gazebo_id is not None
@@ -201,7 +280,7 @@ def test_creation_cleanup_preserves_model_when_px4_presence_is_unknown():
 def test_failed_drone_remains_readable_when_upstream_resources_are_missing():
     async def run():
         p = platform()
-        created = await p.create_drone(DroneCreate(name="vanished"))
+        created = await p.create_drone(DroneCreate(name="vanished", spawn_pad_id="landing_pad_01"))
         item = p._record(created["id"])
         item.status = "failed"
 
@@ -225,7 +304,7 @@ def test_failed_drone_remains_readable_when_upstream_resources_are_missing():
 def test_camera_actions_share_mutation_lock_and_reject_non_cameras():
     async def run():
         p = platform()
-        created = await p.create_drone(DroneCreate(name="camera-lock"))
+        created = await p.create_drone(DroneCreate(name="camera-lock", spawn_pad_id="landing_pad_01"))
         item = p._record(created["id"])
         await p.lock.acquire()
         action = asyncio.create_task(p.sensor_action(item.id, "camera", "activate"))
@@ -250,19 +329,25 @@ def test_validation_errors_are_json_and_follow_api_error_contract():
         assert response.json()["error"]["code"] == "invalid_input"
         assert response.json()["error"]["details"]
 
-        response = client.post("/api/v1/drones/", json={
-            "pose": {"position": {"x": 0, "y": 0, "z": 1},
-                     "orientation": {"x": 0, "y": 0, "z": 0, "w": 0}}
-        })
+        response = client.post("/api/v1/drones/", json={"pose": {"position": {"x": 0, "y": 0, "z": 1}}})
         assert response.status_code == 422
         assert response.json()["error"]["code"] == "invalid_input"
+        assert client.get("/api/v1/world/spawn-pads").json()["pads"][0]["availability"] == "available"
+        missing = client.post("/api/v1/drones/", json={"spawn_pad_id": "missing"})
+        assert missing.status_code == 404 and missing.json()["error"]["code"] == "spawn_pad_not_found"
+        created = client.post("/api/v1/drones/", json={"spawn_pad_id": "landing_pad_01"})
+        assert created.status_code == 201
+        assert created.json()["initial_pose"]["position"]["x"] == -3
+        occupied = client.post("/api/v1/drones/", json={"spawn_pad_id": "landing_pad_01"})
+        assert occupied.status_code == 409 and occupied.json()["error"]["code"] == "spawn_pad_occupied"
+        assert client.get("/api/v1/world/spawn-pads").json()["pads"][0]["availability"] == "occupied"
 
 
 def test_pause_rejected_before_creating_any_resources():
     async def run():
         p = platform()
         p.gazebo.state["simulation"]["paused"] = True
-        with pytest.raises(BackendError) as exc: await p.create_drone(DroneCreate(name="one"))
+        with pytest.raises(BackendError) as exc: await p.create_drone(DroneCreate(name="one", spawn_pad_id="landing_pad_01"))
         assert exc.value.code == "simulation_paused"
         assert not p.gazebo.items and not p.hub.items and not p.drones
     asyncio.run(run())
@@ -284,7 +369,7 @@ def test_realtime_mailbox_keeps_latest_sample_per_type_and_clear_invalidates_old
 def test_autopilot_restart_invalidates_realtime_before_closing_hub_stream():
     async def run():
         p = platform()
-        drone = await p.create_drone(DroneCreate(name="stream-owner"))
+        drone = await p.create_drone(DroneCreate(name="stream-owner", spawn_pad_id="landing_pad_01"))
         events = []
         class Realtime:
             async def invalidate_drone(self, drone_id):

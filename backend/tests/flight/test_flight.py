@@ -1173,8 +1173,8 @@ def test_real_mission_can_be_cancelled_immediately_after_acceptance(flight):
 
 
 def test_real_mission_and_offboard_are_independent_across_two_drones(flight):
-    mission_drone = flight.create_drone(x=12, y=-8, z=1)
-    offboard_drone = flight.create_drone(x=-12, y=12, z=1)
+    mission_drone = flight.create_drone(pad_id="landing_pad_01")
+    offboard_drone = flight.create_drone(pad_id="landing_pad_02")
     points = [{"x": 16, "y": -8, "z": 6}, {"x": 16, "y": -4, "z": 8},
               {"x": 12, "y": -4, "z": 7}, {"x": 8, "y": -8, "z": 6}]
     mission = flight.mission(f"parallel-{uuid.uuid4().hex[:8]}", points)

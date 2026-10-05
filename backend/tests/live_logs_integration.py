@@ -39,7 +39,7 @@ async def run():
                 await subscribe(world1, "world.logs")
                 await subscribe(world2, "world.logs")
                 # Creating a real camera produces Ogre2 visibility-mask warnings.
-                drone = await call("POST", "/api/v1/drones/", json={"name": "live-log-check", "pose": {"position": {"x": 0, "y": 0, "z": 1}}})
+                drone = await call("POST", "/api/v1/drones/", json={"name": "live-log-check", "spawn_pad_id": "landing_pad_01"})
                 gz1, gz2 = await asyncio.gather(message(world1, "log", "world.logs"), message(world2, "log", "world.logs"))
                 assert gz1["data"]["source"] == gz2["data"]["source"] == "gazebo"
                 assert gz1["data"]["message"] == gz2["data"]["message"]

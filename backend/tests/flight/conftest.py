@@ -346,11 +346,14 @@ class FlightEnvironment:
             return [FlightEnvironment._redact(item) for item in value]
         return value
 
-    def create_drone(self, x=12, y=-8, z=1, timeout=30):
+    def create_drone(self, pad_id=None, timeout=30):
         self.geo_context = self.request("GET", "/api/v1/world").json()["spherical_coordinates"]
+        if pad_id is None:
+            pads = self.request("GET", "/api/v1/world/spawn-pads").json()["pads"]
+            pad_id = next(pad["id"] for pad in pads if pad["availability"] == "available")
         response = self.request("POST", "/api/v1/drones/", expected=(201,), timeout=timeout, json={
             "model": "x500_gimbal", "name": f"flight_{int(time.time())}_{len(self.drones)}",
-            "pose": {"position": {"x": x, "y": y, "z": z}},
+            "spawn_pad_id": pad_id,
         }).json()
         assert response["status"] == "ready"
         drone_id = response["id"]

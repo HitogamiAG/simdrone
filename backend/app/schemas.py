@@ -45,7 +45,7 @@ class DroneCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
     model: Literal["x500_gimbal"] = "x500_gimbal"
     name: str | None = Field(default=None, pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,62}$")
-    pose: Pose = Field(default_factory=lambda: Pose(position=Vector3(x=0, y=0, z=1)))
+    spawn_pad_id: str = Field(min_length=1, pattern=r"^[A-Za-z][A-Za-z0-9_-]{0,62}$")
 
 
 class ParameterPatch(BaseModel):
