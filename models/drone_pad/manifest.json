@@ -1,0 +1,113 @@
+{
+  "model": "drone_pad",
+  "version": "1.0.0",
+  "units": "meters",
+  "coordinates": "Gazebo XYZ, Z up",
+  "origin": "center of bottom face",
+  "size": [
+    2.5,
+    2.5,
+    0.3
+  ],
+  "collision_top_z": 0.3,
+  "marker": {
+    "dictionary": "DICT_4X4_50",
+    "id": 0,
+    "border_bits": 1,
+    "size": [
+      0.5,
+      0.5
+    ],
+    "quiet_zone_width": 0.08333333333333333,
+    "center": [
+      0,
+      0,
+      0.3002
+    ],
+    "top_edge_direction": "+Y",
+    "bits": [
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ],
+      [
+        0,
+        1,
+        0,
+        1,
+        1,
+        0
+      ],
+      [
+        0,
+        0,
+        1,
+        0,
+        1,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        1,
+        1,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        1,
+        0,
+        0
+      ],
+      [
+        0,
+        0,
+        0,
+        0,
+        0,
+        0
+      ]
+    ]
+  },
+  "glb_to_gazebo": [
+    [
+      1,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      -1,
+      0
+    ],
+    [
+      0,
+      1,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      0,
+      1
+    ]
+  ],
+  "blender_version": "5.2.2 LTS",
+  "sha256": {
+    "model.sdf": "0b5b7495aa1344bbd2ffe6de762bd77bef3b94d2c967f7c157bbc184ec71105d",
+    "model.config": "23f2451945baffa84066d32fc5fabbb072846b6a3f7c7806ca649ea025b1a08a",
+    "drone_pad.blend": "3d57989601eacd2e39aedc6be1bb5bec506ddaf51c79a8006b842f00aa8cd72b",
+    "drone_pad.glb": "d7f596d75fdebcc47edc0057c3bfa38274faba03b0dc5cbe795a1b62b61ab9fc",
+    "aruco_4x4_50_id0.png": "3f8ba399ebcafabbd42f6429d535715adb72e4459eae9ca2c326049121c4a22f"
+  }
+}

@@ -9,6 +9,11 @@
 он не появляется в списке создаваемых дронов. Единственное описание мира
 находится в [`worlds/empty.sdf`](../worlds/empty.sdf).
 
+[`drone_pad/`](drone_pad/README.md) — локальная статическая площадка
+2,5×2,5×0,3 м с ArUco `DICT_4X4_50`, ID `0`, размером 0,5 м.
+Содержит Blender-исходник, GLB и готовые `model.sdf`/`model.config`;
+подключается к миру через `<include><uri>model://drone_pad</uri></include>`.
+
 ## Источники
 
 `test_quad`, `gimbal_camera` и локальный `x500_gimbal` перенесены из сервиса
