@@ -7,8 +7,10 @@ import { Rnd } from 'react-rnd'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { create } from 'zustand'
 import './App.css'
+import MapView, { type MapManifest } from './MapView'
+import { worldGlbUrl, worldManifestUrl } from './mapAssets'
 
-type Resource = { id: string; name: string; spawn_pad_id?: string; status?: string; simulation?: { pose?: Record<string, unknown> }; [key: string]: unknown }
+type Resource = { id: string; name: string; spawn_pad_id?: string; status?: string; simulation?: { pose?: { position?: { x: number; y: number; z: number }; orientation?: { x: number; y: number; z: number; w: number } } }; [key: string]: unknown }
 type SpawnPad = { id: string; name: string; model: string; availability: 'available' | 'occupied' | 'unavailable'; assigned_drone_id: string | null; unavailable_reason: string | null; surface_pose: { position: { x: number; y: number; z: number } }; spawn_pose: { position: { x: number; y: number; z: number }; orientation: { x: number; y: number; z: number; w: number } }; supported_models: string[] }
 type SpawnPadCatalog = { world: string; world_generation: number; coordinate_system: string; units: string; pads: SpawnPad[] }
 type FloatingWindow = { id: string; drone: string; kind: 'telemetry' | 'video' | 'logs' | 'manual'; minimized: boolean; x: number; y: number; width: number; height: number; z: number }
@@ -35,13 +37,17 @@ function Workbench() {
   const [collapsed, setCollapsed] = useState(false)
   const [active, setActive] = useState<string[]>(['drones', 'missions'])
   const [createDroneOpen, droneModal] = useDisclosure(false)
+  const [padPickerMode, setPadPickerMode] = useState(false)
+  const [droneMenu, setDroneMenu] = useState<{ id: string; x: number; y: number } | null>(null)
   const [droneName, setDroneName] = useState('Drone-01')
   const [selectedPadId, setSelectedPadId] = useState<string | null>(null)
   const [creatingDrone, setCreatingDrone] = useState(false)
   const [createDroneError, setCreateDroneError] = useState<string | null>(null)
   const queryClient = useQueryClient()
   const [viewFollow, setViewFollow] = useState(false)
-  const [layers, setLayers] = useState({ drones: true, routes: true, grid: true })
+  const [mapZoom, setMapZoom] = useState(1)
+  const [focusWorld, setFocusWorld] = useState(true)
+  const [layers, setLayers] = useState({ drones: true, routes: true, pads: true, grid: true })
   const [pose, setPose] = useState<Record<string, unknown> | null>(null)
   const { selectedDrone, setSelectedDrone, view, setView, windows, openWindow, patchWindow, closeWindow } = useWorkspace()
   const status = useQuery({ queryKey: ['status'], queryFn: () => get<Record<string, unknown>>('/api/v1/system/status'), ...queryOptions })
@@ -49,6 +55,8 @@ function Workbench() {
   const drones = useQuery({ queryKey: ['drones'], queryFn: () => get<Resource[]>('/api/v1/drones/'), ...queryOptions })
   const missions = useQuery({ queryKey: ['missions'], queryFn: () => get<Resource[]>('/api/v1/missions/'), ...queryOptions })
   const map = useQuery({ queryKey: ['world-map'], queryFn: () => get<Record<string, unknown>>('/api/v1/world/map'), retry: false })
+  const localMap = useQuery({ queryKey: ['local-world-manifest'], queryFn: () => get<MapManifest>(worldManifestUrl), retry: false, staleTime: Infinity })
+  const localGlb = useQuery({ queryKey: ['local-world-glb'], queryFn: async () => { const response = await fetch(worldGlbUrl, { method: 'HEAD' }); if (!response.ok) throw new Error('GLB asset unavailable'); return true }, retry: false, staleTime: Infinity })
   const spawnPads = useQuery({ queryKey: ['spawn-pads'], queryFn: () => get<SpawnPadCatalog>('/api/v1/world/spawn-pads'), ...queryOptions })
 
   useEffect(() => {
@@ -74,7 +82,11 @@ function Workbench() {
   const selectedPad = padRows.find((pad) => pad.id === selectedPadId) ?? null
   const availablePads = padRows.filter((pad) => pad.availability === 'available' && pad.supported_models.includes('x500_gimbal'))
   const invalidDroneName = droneName.trim() !== '' && !/^[A-Za-z][A-Za-z0-9_-]{0,62}$/.test(droneName.trim())
-  const mapReady = false // Enable only when a local GLB is loaded and its control points are accepted.
+  const localMatchesBackend = Boolean(localMap.data && map.data?.available && localMap.data.package_id === map.data.package_id && localMap.data.version === map.data.version && localMap.data.world_name === map.data.world_name && localMap.data.coordinate_system === map.data.coordinate_system)
+  const mapReady = localMatchesBackend && localGlb.isSuccess
+  const focusedDrone = droneRows.find((drone) => drone.id === selectedDrone)
+  const droneFocus = focusedDrone?.simulation?.pose?.position
+  const cameraFocus: [number, number, number] = !focusWorld && droneFocus ? [droneFocus.x, droneFocus.y, droneFocus.z] : [0, 0, 0]
 
   const createDrone = async () => {
     if (!selectedPad || selectedPad.availability !== 'available' || creatingDrone) return
@@ -133,7 +145,7 @@ function Workbench() {
               <Group justify="space-between" mb="xs"><Text size="xs" c="dimmed">РЕСУРСЫ МИРА</Text><ActionIcon size="sm" aria-label="Создать дрон" onClick={() => { setCreateDroneError(null); setSelectedPadId(null); droneModal.open(); void spawnPads.refetch() }}><IconCirclePlus size={17} /></ActionIcon></Group>
               {drones.isLoading && <Text size="sm" c="dimmed">Загрузка…</Text>}
               {drones.isError && <InlineError message="Backend недоступен" onRetry={() => void drones.refetch()} />}
-              {droneRows.map((drone) => <div className={`resource-row ${selectedDrone === drone.id ? 'selected' : ''}`} key={drone.id} onClick={() => setSelectedDrone(drone.id)} onContextMenu={(event) => { event.preventDefault(); setSelectedDrone(drone.id); openWindow(drone.id, 'telemetry') }}>
+              {droneRows.map((drone) => <div className={`resource-row ${selectedDrone === drone.id ? 'selected' : ''}`} key={drone.id} onClick={() => { setSelectedDrone(drone.id); setFocusWorld(false) }} onContextMenu={(event) => { event.preventDefault(); setSelectedDrone(drone.id); openWindow(drone.id, 'telemetry') }}>
                 <span className="drone-dot" /><div className="resource-main"><Text size="sm" fw={600}>{drone.name || drone.id}</Text><Text size="xs" c="dimmed">{String(drone.status ?? 'Состояние неизвестно')} · площадка {drone.spawn_pad_id ?? 'не указана'}</Text></div><Badge size="xs" variant="outline" color="gray">PX4</Badge>
               </div>)}
               {!droneRows.length && !drones.isLoading && !drones.isError && <EmptyHint text="В мире пока нет дронов" />}
@@ -157,18 +169,21 @@ function Workbench() {
     </aside>
 
     <main className="workspace">
-      <section className={`map-stage ${layers.grid ? 'show-grid' : ''}`}>
+      <section className="map-stage" onClick={() => setDroneMenu(null)}>
         <div className="map-toolbar map-toolbar-left">
           <Group gap={0} className="segmented"><Button size="xs" variant={view === '2d' ? 'filled' : 'subtle'} onClick={() => setView('2d')}>2D</Button><Button size="xs" variant={view === '3d' ? 'filled' : 'subtle'} onClick={() => setView('3d')}>3D</Button></Group>
-          <ActionIcon variant="default" aria-label="Уменьшить масштаб"><IconMinus size={15} /></ActionIcon><Badge variant="outline" color="gray">100%</Badge><ActionIcon variant="default" aria-label="Весь участок"><IconMaximize size={15} /></ActionIcon>
-          <Button size="xs" variant={viewFollow ? 'light' : 'default'} onClick={() => setViewFollow(!viewFollow)}>Следовать</Button>
+          <ActionIcon variant="default" aria-label="Уменьшить масштаб" onClick={() => setMapZoom((zoom) => Math.max(0.12, zoom * 0.8))}><IconMinus size={15} /></ActionIcon><Badge variant="outline" color="gray">{Math.round(mapZoom * 100)}%</Badge><ActionIcon variant="default" aria-label="Увеличить масштаб" onClick={() => setMapZoom((zoom) => Math.min(8, zoom * 1.25))}>+</ActionIcon><ActionIcon variant="default" aria-label="Весь участок" onClick={() => { setMapZoom(0.13); setFocusWorld(true); setViewFollow(false) }}><IconMaximize size={15} /></ActionIcon>
+          {selectedDrone && <Button size="xs" variant="default" onClick={() => { setFocusWorld(false); setViewFollow(false) }}>Выбранный дрон</Button>}<Button size="xs" disabled={!selectedDrone} variant={viewFollow ? 'light' : 'default'} onClick={() => { setFocusWorld(false); setViewFollow(!viewFollow) }}>Следовать</Button>
         </div>
         <div className="map-toolbar map-toolbar-right">
-          {Object.entries(layers).map(([key, enabled]) => <Button key={key} size="xs" variant={enabled ? 'light' : 'default'} onClick={() => setLayers({ ...layers, [key]: !enabled })}>{key === 'drones' ? 'Дроны' : key === 'routes' ? 'Маршруты' : 'Сетка'}</Button>)}
+          {Object.entries({ drones: layers.drones, routes: layers.routes, pads: layers.pads, grid: layers.grid }).map(([key, enabled]) => <Button key={key} size="xs" variant={enabled ? 'light' : 'default'} onClick={() => setLayers({ ...layers, [key]: !enabled })}>{key === 'drones' ? 'Дроны' : key === 'routes' ? 'Маршруты' : key === 'pads' ? 'Площадки' : 'Сетка'}</Button>)}
         </div>
-        <div className="map-prerequisite"><IconMap2 size={34} stroke={1.4} /><Text fw={600} mt="md">{mapReady ? String(map.data?.world_name ?? 'Участок') : map.data?.available ? 'Модель участка ожидает подключения' : 'Пакет участка не подключён'}</Text><Text size="sm" c="dimmed" ta="center" maw={440}>{mapReady ? 'Проверенный пакет участка.' : map.data?.available ? 'Backend сообщает о наличии manifest, но GLB-загрузчик включается после проверки контрольных точек и преобразования координат пакета.' : 'Для корректной карты нужен принятый Blender-пакет с world.glb и manifest. Дроны и маршруты появятся на общей модели участка после проверки координат с Gazebo.'}</Text><Badge variant="outline" color="yellow" mt="sm">Карта и управление полётом заблокированы</Badge></div>
+        {mapReady && localMap.data && <MapView view={view} zoom={mapZoom} focus={cameraFocus} follow={viewFollow} manifest={localMap.data} pads={padRows} drones={droneRows} selectedDrone={selectedDrone} showPads={layers.pads} showDrones={layers.drones} showGrid={layers.grid} onSelectDrone={(drone) => { setSelectedDrone(drone.id); setFocusWorld(false); setDroneMenu(null) }} onSelectPad={(pad) => { setSelectedPadId(pad.id); setFocusWorld(false); setCreateDroneError(null); setPadPickerMode(false); droneModal.open() }} onDroneContext={(drone, x, y) => { setSelectedDrone(drone.id); setFocusWorld(false); setDroneMenu({ id: drone.id, x, y }) }} onPointerMissed={() => { if (padPickerMode) { setPadPickerMode(false); droneModal.open() } }} />}
+        {!mapReady && <div className="map-prerequisite"><IconMap2 size={34} stroke={1.4} /><Text fw={600} mt="md">{map.isError || localMap.isError || localGlb.isError ? 'Не удалось загрузить пакет участка' : map.data?.available && !localMatchesBackend ? 'Пакет карты не совпадает с Backend' : map.data?.available ? 'Загрузка модели участка…' : 'Пакет участка не подключён'}</Text><Text size="sm" c="dimmed" ta="center" maw={440}>{map.isError || localMap.isError || localGlb.isError ? 'Проверьте локальную поставку world.glb/manifest и доступность Backend.' : map.data?.available && !localMatchesBackend ? `Backend: ${String(map.data.package_id)} ${String(map.data.version)}; браузер: ${localMap.data?.package_id ?? 'manifest недоступен'} ${localMap.data?.version ?? ''}.` : 'Карта появится после загрузки локального Blender-пакета и сверки его версии с Backend.'}</Text><Badge variant="outline" color="yellow" mt="sm">Карта и управление полётом заблокированы</Badge></div>}
         {selectedDrone && <div className="selected-drone-chip"><span className="drone-dot" /><div><Text size="sm" fw={600}>Выбранный дрон</Text><Text size="xs" c="dimmed">{selectedDrone} · {pose?.drone_id === selectedDrone ? `обновлено ${String(pose.age_s ?? '—')} с назад` : 'ожидание позы'}</Text></div><ActionIcon variant="subtle" aria-label="Открыть телеметрию" onClick={() => openWindow(selectedDrone, 'telemetry')}><IconActivity size={16} /></ActionIcon></div>}
-        <div className="coordinate-readout">XYZ Gazebo · м <span>{pose?.pose && typeof pose.pose === 'object' ? JSON.stringify(pose.pose) : '—'}</span></div>
+        <div className="coordinate-readout">XYZ Gazebo · м <span>{formatPosition(pose?.pose && typeof pose.pose === 'object' ? pose.pose as Resource['simulation'] extends { pose?: infer P } ? P : never : null)}</span></div>
+        {padPickerMode && <div className="map-pick-hint" onClick={(event) => event.stopPropagation()}>Выберите площадку на карте <Button size="compact-xs" variant="subtle" onClick={() => { setPadPickerMode(false); droneModal.open() }}>Отмена</Button></div>}
+        {droneMenu && <div className="drone-context-menu" style={{ left: Math.min(droneMenu.x, window.innerWidth - 220), top: Math.min(droneMenu.y, window.innerHeight - 230) }} onClick={(event) => event.stopPropagation()}><Text size="xs" c="dimmed">Действия · {droneRows.find((drone) => drone.id === droneMenu.id)?.name ?? droneMenu.id}</Text>{(['telemetry', 'video', 'logs', 'manual'] as const).map((kind) => <Button key={kind} variant="subtle" size="xs" fullWidth onClick={() => { openWindow(droneMenu.id, kind); setDroneMenu(null) }}>{windowTitle[kind]}</Button>)}{(['RTL', 'Посадка', 'Настройки', 'Reset', 'Удалить'] as const).map((label) => <Button key={label} variant="subtle" size="xs" fullWidth disabled title="Действие ещё не подключено">{label}</Button>)}</div>}
         <div className="floating-windows">{windows.map((window) => <Rnd key={window.id} bounds="parent" minWidth={window.kind === 'manual' ? 400 : 300} minHeight={window.kind === 'manual' ? 380 : 220} size={{ width: window.width, height: window.minimized ? 42 : window.height }} position={{ x: window.x, y: window.y }} style={{ zIndex: window.z }} onDragStop={(_, data) => patchWindow(window.id, { x: data.x, y: data.y })} onResizeStop={(_, __, ref, ___, position) => patchWindow(window.id, { width: ref.offsetWidth, height: ref.offsetHeight, ...position })} onMouseDown={() => patchWindow(window.id, { z: Math.max(0, ...windows.map((item) => item.z)) + 1 })} dragHandleClassName="window-titlebar">
             <div className="floating-window"><header className="window-titlebar"><div><Text size="sm" fw={600}>{windowTitle[window.kind]}</Text><Text size="xs" c="dimmed">{window.drone}</Text></div><Group gap={4}><ActionIcon size="sm" variant="subtle" aria-label="Свернуть окно" onClick={() => patchWindow(window.id, { minimized: !window.minimized })}>{window.minimized ? <IconMaximize size={14} /> : <IconMinus size={14} />}</ActionIcon><ActionIcon size="sm" variant="subtle" aria-label="Закрыть окно" onClick={() => closeWindow(window.id)}><IconX size={14} /></ActionIcon></Group></header>{!window.minimized && <div className="window-content">{window.kind === 'video' ? <div className="video-placeholder"><IconVideo /><Text size="sm" c="dimmed">Видео подключается через WHEP</Text></div> : window.kind === 'logs' ? <Text size="sm" c="dimmed">Ожидание сообщений…</Text> : window.kind === 'manual' ? <Text size="sm" c="dimmed">Захват управления · WASD / RF / QE</Text> : <><Text size="xs" c="dimmed">ПОЗА GAZEBO</Text><Text size="sm">{pose ? JSON.stringify(pose.pose ?? pose) : 'Ожидание свежего образца'}</Text></>}</div>}</div>
           </Rnd>)}</div>
@@ -179,7 +194,7 @@ function Workbench() {
       <Stack>
         <TextInput label="Имя" value={droneName} onChange={(event) => setDroneName(event.currentTarget.value)} maxLength={63} error={invalidDroneName ? 'Начните с латинской буквы; далее допустимы буквы, цифры, _ и - (до 63 символов).' : undefined} />
         <Text size="sm" c="dimmed">Модель: x500_gimbal</Text>
-        <Text size="sm" fw={600}>Площадка спауна</Text>
+        <Group justify="space-between"><Text size="sm" fw={600}>Площадка спауна</Text>{mapReady && <Button size="compact-xs" variant="default" onClick={() => { droneModal.close(); setPadPickerMode(true) }}>Выбрать на карте</Button>}</Group>
         {spawnPads.isLoading && <Text size="sm" c="dimmed">Загрузка площадок…</Text>}
         {spawnPads.isError && <InlineError message="Не удалось загрузить площадки" onRetry={() => void spawnPads.refetch()} />}
         {spawnPads.isSuccess && !padRows.length && <EmptyHint text="В конфигурации мира нет площадок для спауна" />}
@@ -193,6 +208,7 @@ function Workbench() {
           </button>
         })}
         {selectedPad && <Text size="xs" c="dimmed">Начальная поза дрона задаётся миром: XYZ {selectedPad.spawn_pose.position.x.toFixed(3)}, {selectedPad.spawn_pose.position.y.toFixed(3)}, {selectedPad.spawn_pose.position.z.toFixed(3)} м.</Text>}
+        {selectedPad?.assigned_drone_id && <Button variant="default" onClick={() => { setSelectedDrone(selectedPad.assigned_drone_id); setFocusWorld(false); droneModal.close() }}>Выбрать владельца {droneRows.find((drone) => drone.id === selectedPad.assigned_drone_id)?.name ?? selectedPad.assigned_drone_id}</Button>}
         {spawnPads.isSuccess && availablePads.length === 0 && <Text size="xs" c="yellow">Сейчас нет доступных площадок. После удаления дрона список обновится автоматически.</Text>}
         {createDroneError && <Text role="alert" size="sm" c="red">{createDroneError}</Text>}
         <Group justify="flex-end"><Button variant="default" disabled={creatingDrone} onClick={droneModal.close}>Отмена</Button><Button loading={creatingDrone} disabled={!selectedPad || selectedPad.availability !== 'available' || invalidDroneName || spawnPads.isFetching} onClick={() => void createDrone()}>Создать</Button></Group>
@@ -201,6 +217,7 @@ function Workbench() {
   </div>
 }
 
+function formatPosition(pose: { position?: { x: number; y: number; z: number } } | null) { const p = pose?.position; return p ? `${p.x.toFixed(2)}, ${p.y.toFixed(2)}, ${p.z.toFixed(2)}` : '—' }
 function EmptyHint({ text }: { text: string }) { return <div className="empty-hint">{text}</div> }
 function InlineError({ message, onRetry }: { message: string; onRetry: () => void }) { return <Group justify="space-between"><Text size="xs" c="red">{message}</Text><Button size="compact-xs" variant="subtle" onClick={onRetry}>Повторить</Button></Group> }
 

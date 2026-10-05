@@ -4,10 +4,13 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
+    "predev": "node scripts-prepare-map-assets.mjs",
     "dev": "vite",
+    "prebuild": "node scripts-prepare-map-assets.mjs",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "preview": "vite preview",
+    "pretest": "node scripts-prepare-map-assets.mjs",
     "test": "vitest run",
     "test:watch": "vitest"
   },

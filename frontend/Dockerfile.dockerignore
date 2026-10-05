@@ -1,0 +1,11 @@
+**
+!frontend
+!frontend/**
+!models
+!models/empty
+!models/empty/world.glb
+!models/empty/manifest.json
+frontend/node_modules
+frontend/dist
+frontend/coverage
+frontend/public/models/empty

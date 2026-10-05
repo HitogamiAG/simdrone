@@ -6,3 +6,5 @@
 **/*.pyc
 PX4-Autopilot
 third-party
+
+frontend/public/models/empty
