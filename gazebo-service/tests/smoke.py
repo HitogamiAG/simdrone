@@ -80,7 +80,7 @@ async def main():
         reset_world = await client.post("/api/v1/world/world-reset")
         assert reset_world.status_code == 200, reset_world.text
         restored = (await client.get("/api/v1/world")).json()
-        assert restored["physics"]["max_step_size"] == 0.004
+        assert restored["physics"]["max_step_size"] == 0.001
         assert (await client.get("/api/v1/drones/")).json() == []
 
         before_reboot = (await client.get("/api/v1/server/server-alive/")).json()

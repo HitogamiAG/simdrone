@@ -111,7 +111,7 @@ async def main():
         print("PASS delete: sensor WebSocket closed", flush=True)
         await checked(c, "POST", "/api/v1/world/world-reset")
         restored = await checked(c, "GET", "/api/v1/world")
-        assert restored["physics"]["max_step_size"] == .004
+        assert restored["physics"]["max_step_size"] == .001
         assert restored["physics"]["real_time_factor"] == 1
         assert restored["gravity"] == [0, 0, -9.80665]
         assert (await checked(c, "GET", "/api/v1/drones/")) == []

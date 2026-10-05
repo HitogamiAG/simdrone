@@ -230,8 +230,8 @@
   "collision": "Gazebo plane (infinite); visual footprint is finite",
   "blender_version": "5.2.2 LTS",
   "sha256": {
-    "empty.blend": "4e1605e0034f96c8359e3c21b24c32a0f70c97ee09c5b86e0fab9c4b7e011080",
-    "world.glb": "8d3e68bb5527cb4c415d8216206d136e3fa263522adcd65a5d8da6153fe06a8f",
-    "../../worlds/empty.sdf": "ff136383a5e151bfa8844d03ac578d00ba004e4672a5f22cf5e7780963e13ab6"
+    "empty.blend": "e4833838d1c1a04f8a3328cb4ee68544061f4d1b096cc42c0c0f529805aa77c0",
+    "world.glb": "ca1f3b9e4641b78cdcb32fe38e4affe0db4045d8a6dd2f872a18770942c2c6ab",
+    "../../worlds/empty.sdf": "7b2c32b098ab6a7fb3d1d448f9af7e54b3da9badfda817dd2b4b10c4dc4ae7e1"
   }
 }

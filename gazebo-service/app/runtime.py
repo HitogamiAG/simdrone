@@ -139,7 +139,7 @@ class RuntimeCoordinator:
             node = parent.find(name) if parent is not None else None
             return float(node.text) if node is not None and node.text else default
         self.physics_values = {
-            "max_step_size": float_text(physics, "max_step_size", 0.004),
+            "max_step_size": float_text(physics, "max_step_size", 0.001),
             "real_time_factor": float_text(physics, "real_time_factor", 1.0),
         }
         grav = world.findtext("gravity", "0 0 -9.80665").split()
