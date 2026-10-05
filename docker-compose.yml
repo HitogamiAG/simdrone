@@ -1,4 +1,17 @@
 services:
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: uav-platform-frontend:local
+    ports:
+      - "3000:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+    init: true
+
   gazebo-service:
     build:
       context: .
@@ -72,8 +85,10 @@ services:
       BACKEND_STARTUP_TIMEOUT: ${BACKEND_STARTUP_TIMEOUT:-120}
       BACKEND_MAX_SUBSCRIPTIONS: ${BACKEND_MAX_SUBSCRIPTIONS:-32}
       MISSION_DB: /data/missions.sqlite3
+      WORLD_MAP_MANIFEST: /world-model/manifest.json
     volumes:
       - backend-missions:/data
+      - ./world-model:/world-model:ro
     ports:
       - "${BACKEND_PORT:-8003}:8003"
     depends_on:
