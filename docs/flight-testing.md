@@ -79,3 +79,70 @@ PX4 Hub `test_flight.py` ранее прошёл **20/20** в одноразов
 | `docker compose config --quiet` и конфигурация `docker-compose.flight.yml` | Прошли; временные `.env` / `.env.flight` удалены, отдельный Compose-проект освобождён |
 
 Для текущей проверки использовался отдельный Compose проект `simdrone-flight-test`; рабочие контейнеры не перезапускались. Новые образы пересобраны до запуска. Три pause/resume-полёта прошли одним прогоном: armed Offboard, unarmed Offboard reservation и автономная миссия; результат группы `3 passed`. Отдельный прогон отказа MAVSDK прошёл `1 passed` за 81,09 с: runner завершил только `mavsdk_server`, PX4 запустил Offboard-loss failsafe, RTL и посадку; ULog подтвердил `Failsafe activated`, `RTL: start return`, `RTL: land at destination`, `Landing detected`, `Disarmed by landing`, `landed=1` и disarmed. Независимая поза Gazebo подтвердила стабильность у станции, а хостовый probe подтвердил, что PX4 оставался жив после этого до cleanup. Первый смешанный прогон включал три успешных pause/resume теста, но MAVSDK сценарий остановился до инъекции из-за тестового URL без завершающего `/`; после исправления отказовой полёт повторно прошёл. Lifecycle delete/restart/reboot в воздухе по-прежнему не проверен. Артефакты лежат только в игнорируемом `artifacts/flight/`; JSON, траектории и ULog не коммитятся. Полный Hub suite на обновлённом коде прошёл `51 passed`; тесты используют подменённые процессы и не заменяют физический тест. За пределами MVP остались геопривязка с ненулевым heading, сниженные PX4 limits и два параллельных дрона.
+
+## Диагностика сбоя production UI, 06.10.2026
+
+Обнаружены два дефекта, влияющие на реальные полёты:
+
+1. Создание после удаления повторно использовало пользовательское имя как имя
+   Gazebo-модели. В production у `Drone-01` обнаружены три NavSat publisher на одном
+   topic. PX4 мог получать измерения разных поколений. Каждое создание теперь
+   получает уникальное `gazebo_model`, как уже происходило при reset. Публичные
+   ID/имена и закрепление площадок сохранены. Независимый наблюдатель harness
+   подписывается на `autopilot.binding.gazebo_model`, а не логическое имя.
+2. На коротком UI-маршруте `(-1,2,10)` после взлёта с `landing_pad_01` шаг physics
+   4 мс приводил к неустойчивости при изменении курса и посадке вне станции.
+   ULog показал актуальные GPS и колебания угловых скоростей перед переворотом.
+   При единственном изменении шага на 1 мс тот же production UI-маршрут завершился
+   `completed`, RTL и disarm, посадка в 0,17 м от станции. Исходный SDF, fallback
+   сервиса и сохранённый Blender-пакет переведены на 1 мс; reset/reboot сохраняют
+   этот default. Поддержка произвольного шага API не означает полётную приёмку
+   таких настроек.
+
+Отдельно устранены непрерывные `pxh>` prompts: PX4 запускается в daemon mode
+`-d` с закрытым stdin. Реальный process log около 3 КБ вместо многогигабайтного
+потока. Неизвестные численные измерения PX4 (`NaN`/infinity) сериализуются как
+`null`, чтобы браузер принимал строгий JSON.
+
+Проверки после изменений:
+
+- Gazebo Docker: 21 контрактный тест, реальный regression и smoke.
+- Hub Docker: 52 теста; тестовая среда использует Hub image с MAVSDK.
+- Изолированные реальные повторное создание с одним именем (два Offboard полёта)
+  и четырёхточечная миссия: 2 passed за 173,04 с до изменения шага; посадка миссии
+  около 0,056 м от станции по независимой Gazebo-позе.
+- Итоговый пересобранный образ с исходным шагом 1 мс: повторное имя/два Offboard
+  полёта, четырёхточечная миссия и короткая одноточечная миссия с изменением курса —
+  **3 passed, 25 deselected** за 255,18 с. Короткий маршрут наблюдался независимым
+  Gazebo Transport, посадка около 0,064 м от станции. Дроны удалены тестовым cleanup.
+- Production Chromium, 1440×900, настоящий Backend/Gazebo/PX4: создание
+  `Drone-01`, выбор площадки, telemetry window, validation/start одноточечной
+  миссии, наблюдение `completed`, RTL/посадка/disarm. Browser errors = 0,
+  невалидных WebSocket JSON = 0.
+- Затем тот же дрон управляемо поднялся клавиатурой Space+R и экранной кнопкой
+  «R вверх»; отпускание обнулило ввод, синтетическое событие blur сняло захват.
+  RTL привёл к посадке в 0,21 м от станции, сессия закрыта, дрон удалён.
+  Синтетическое blur не заменяет испытание настоящего отключения браузера.
+
+Образы обновлены application/resource слоями поверх уже собранных закреплённых
+runtime images; Gazebo/PX4/MAVSDK и библиотеки не менялись. Это экономит место
+для диагностики после переполнения диска логами. Исходные Dockerfiles остаются
+способом полной сборки. Логи, ULog и траектории находятся в игнорируемом
+`artifacts/flight/diagnosis/` и не включены в Git.
+
+Это устранение данного сбоя и целевые полётные проверки. Полная пространственная
+приёмка GLB/Gazebo ≤2 см и весь обязательный браузерный набор MVP остаются отдельными
+критериями; успешный RTSP smoke не считается проверкой WebRTC кадра.
+
+Команды целевого итогового прогона (образ runner предварительно обновлён):
+
+```sh
+docker compose exec -T gazebo-service pytest -q /opt/uav/tests/test_contract.py
+docker compose exec -T gazebo-service python /opt/uav/tests/regression.py
+docker compose exec -T gazebo-service python /opt/uav/tests/smoke.py
+docker compose -p simdrone-flight-test --env-file .env.flight -f docker-compose.flight.yml run --rm --no-deps flight-runner python -m pytest -q test_flight.py -k 'delete_recreate_same_name or short_mission_yaw_return or four_waypoints_progress'
+docker compose config --quiet
+```
+
+Значение stats `real_time_factor=0.0` при продолжающемся sim_time не было признаком
+остановки мира и не объясняло сбой. Выводы сделаны по реальным позам и ULog.

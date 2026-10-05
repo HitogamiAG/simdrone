@@ -237,6 +237,41 @@ def test_real_offboard_vertical_motion_zero_hold_and_rtl(flight):
     assert state["armed"] is False
 
 
+def test_real_delete_recreate_same_name_keeps_px4_measurements_isolated(flight):
+    name = f"reused_{uuid.uuid4().hex[:8]}"
+    previous_model = None
+    for _ in range(2):
+        created = flight.create_drone(name=name)
+        drone_id = created["id"]
+        model = created["autopilot"]["binding"]["gazebo_model"]
+        assert created["name"] == name
+        assert model != previous_model
+        previous_model = model
+        observer = flight.observers[-1]
+        station = created["simulation"]["pose"]["position"]
+        initial, _ = event_data(observer, "telemetry")
+        session = flight.request("POST", f"/api/v1/drones/{drone_id}/flight/offboard/sessions",
+                                 expected=(201,), json={"request_id": str(uuid.uuid4())}).json()
+        ws = control_socket(drone_id, session)
+        try:
+            flight.request("POST", f"/api/v1/drones/{drone_id}/flight/offboard/sessions/{session['session_id']}/arm",
+                           expected=(202,), json={"request_id": str(uuid.uuid4())})
+            _, airborne = drive_to_altitude(ws, 0, observer, altitude(initial), {"up": .7})
+            pose = flight.gazebo.current(model)["position"]
+            assert pose["z"] > station["z"] + 3, "PX4 climb did not match independent Gazebo pose"
+            assert abs((pose["z"] - station["z"]) - (altitude(airborne) - altitude(initial))) < 1.5
+        finally:
+            ws.close()
+        flight.request("POST", f"/api/v1/drones/{drone_id}/flight/return", expected=(202,),
+                       json={"request_id": str(uuid.uuid4())})
+        flight.wait_landed(drone_id, flight.native_geodetic(station))
+        landed = flight.gazebo.current(model)["position"]
+        assert math.dist([landed[a] for a in ("x", "y", "z")], [station[a] for a in ("x", "y", "z")]) < 3
+        flight.request("DELETE", f"/api/v1/drones/{drone_id}/", expected=(200, 204))
+        pads = flight.request("GET", "/api/v1/world/spawn-pads").json()["pads"]
+        assert next(p for p in pads if p["id"] == created["spawn_pad_id"])["availability"] == "available"
+
+
 def test_real_spawn_pad_contact_on_both_pads_and_release_after_delete(flight):
     catalog = flight.request("GET", "/api/v1/world/spawn-pads").json()["pads"]
     pads = {pad["id"]: pad for pad in catalog}
@@ -245,7 +280,7 @@ def test_real_spawn_pad_contact_on_both_pads_and_release_after_delete(flight):
     for pad_id in ("landing_pad_01", "landing_pad_02"):
         pad = pads[pad_id]
         created = flight.create_drone(pad_id=pad_id)
-        drone_id, model = created["id"], created["name"]
+        drone_id, model = created["id"], created["autopilot"]["binding"]["gazebo_model"]
         assert created["spawn_pad_id"] == pad_id
         assert created["initial_pose"] == pad["spawn_pose"]
 
@@ -345,7 +380,7 @@ def test_real_offboard_unarmed_session_is_revoked_by_pause(flight):
 
 def test_real_mavsdk_loss_preserves_px4_offboard_failsafe(flight):
     created = flight.create_drone()
-    drone_id, model = created["id"], created["name"]
+    drone_id, model = created["id"], created["autopilot"]["binding"]["gazebo_model"]
     station_xyz = created["simulation"]["pose"]["position"]
     initial_pose = flight.gazebo.current(model)
     instance_id = flight.instance_ids[drone_id]
@@ -402,7 +437,7 @@ def test_real_offboard_three_consecutive_flights_without_reset(flight):
     drone_id = created["id"]
     observer = flight.observers[-1]
     instance_id = flight.instance_ids[drone_id]
-    model = created["name"]
+    model = created["autopilot"]["binding"]["gazebo_model"]
     station = flight.native_geodetic(created["simulation"]["pose"]["position"])
     generation = flight.wait_ready(drone_id)["generation"]
 
@@ -441,7 +476,7 @@ def test_real_mission_four_waypoints_progress_return_and_replay(flight):
     created = flight.create_drone()
     drone_id = created["id"]
     observer = flight.observers[-1]
-    name = created["name"]
+    name = created["autopilot"]["binding"]["gazebo_model"]
     waypoints = [
         {"x": 16, "y": -8, "z": 6},
         {"x": 16, "y": -4, "z": 8},
@@ -503,6 +538,42 @@ def test_real_mission_four_waypoints_progress_return_and_replay(flight):
     assert landed["armed"] is False
 
 
+def test_real_short_mission_yaw_return_stays_stable(flight):
+    """The short UI route used to tip over at the world's 4 ms step."""
+    created = flight.create_drone(name="Drone-01")
+    drone_id = created["id"]
+    name = created["autopilot"]["binding"]["gazebo_model"]
+    station = created["simulation"]["pose"]["position"]
+    world = flight.request("GET", "/api/v1/world").json()
+    assert world["physics"]["max_step_size"] == .001
+    target = {"x": station["x"] + 2, "y": station["y"] + 2, "z": 10}
+    mission = flight.mission(f"short-{uuid.uuid4().hex[:8]}", [target],
+                             takeoff_height_m=10, return_height_m=10)
+    accepted = flight.request("POST", f"/api/v1/drones/{drone_id}/flight/missions",
+                              expected=(202,), json={"request_id": str(uuid.uuid4()),
+                              "mission_id": mission["id"], "revision": mission["revision"]}).json()
+    deadline = time.monotonic() + MISSION_TIMEOUT
+    reached = False
+    while time.monotonic() < deadline:
+        pose = flight.gazebo.current(name)
+        position = pose["position"]
+        distance = math.hypot(position["x"] - target["x"], position["y"] - target["y"])
+        reached |= distance <= 1.5 and abs(position["z"] - target["z"]) <= 1.5
+        assert position["z"] < 15, f"Unexpected altitude: {pose}"
+        assert math.hypot(position["x"] - station["x"], position["y"] - station["y"]) < 10, pose
+        state = flight.request("GET", f"/api/v1/drones/{drone_id}/flight/executions/{accepted['execution_id']}").json()
+        if state["status"] in {"completed", "failed", "interrupted"}:
+            break
+        time.sleep(.2)
+    else:
+        raise AssertionError("Short mission timed out")
+    assert state["status"] == "completed", state
+    assert reached, "Gazebo did not observe the single waypoint"
+    flight.wait_landed(drone_id, flight.native_geodetic(station))
+    landed = flight.gazebo.current(name)["position"]
+    assert math.hypot(landed["x"] - station["x"], landed["y"] - station["y"]) < 1
+
+
 def test_real_mission_pause_resume_preserves_autonomous_execution(flight):
     created = flight.create_drone()
     drone_id = created["id"]
@@ -541,7 +612,7 @@ def test_real_mission_three_consecutive_flights_without_reset(flight):
     created = flight.create_drone()
     drone_id = created["id"]
     instance_id = flight.instance_ids[drone_id]
-    model = created["name"]
+    model = created["autopilot"]["binding"]["gazebo_model"]
     observer = flight.observers[-1]
     station = flight.native_geodetic(created["simulation"]["pose"]["position"])
     waypoints = [
@@ -706,13 +777,13 @@ def test_real_offboard_returns_after_backend_loss(flight):
     assert state and state.get("offboard", {}).get("status") == "returning", \
         f"Backend loss did not trigger Offboard watchdog RTL: {state}"
     station = created["simulation"]["pose"]["position"]
-    wait_hub_landed_at_station(flight, instance_id, hub_observer, created["name"], station)
+    wait_hub_landed_at_station(flight, instance_id, hub_observer, created["autopilot"]["binding"]["gazebo_model"], station)
 
 
 def test_real_offboard_drone_reset_invalidates_old_session_generation(flight):
     created = flight.create_drone()
     drone_id = created["id"]
-    model = created["name"]
+    model = created["autopilot"]["binding"]["gazebo_model"]
     old_instance = flight.instance_ids[drone_id]
     old_generation = flight.request("GET", f"/api/v1/drones/{drone_id}/flight").json()["generation"]
     original_pose = flight.gazebo.current(model)["position"]
@@ -788,7 +859,7 @@ def test_real_mission_cancel_returns_and_is_idempotent(flight):
     deadline = time.monotonic() + 60
     airborne = False
     while time.monotonic() < deadline:
-        current = flight.gazebo.current(created["name"])["position"]
+        current = flight.gazebo.current(created["autopilot"]["binding"]["gazebo_model"])["position"]
         if current["z"] > created["simulation"]["pose"]["position"]["z"] + 2:
             airborne = True
             break
@@ -815,7 +886,7 @@ def test_real_mission_cancel_returns_and_is_idempotent(flight):
 
 def test_real_offboard_body_axes_yaw_and_default_speed_limits(flight):
     created = flight.create_drone()
-    drone_id, model = created["id"], created["name"]
+    drone_id, model = created["id"], created["autopilot"]["binding"]["gazebo_model"]
     observer = flight.observers[-1]
     initial_alt = altitude(event_data(observer, "telemetry")[0])
     session = flight.request("POST", f"/api/v1/drones/{drone_id}/flight/offboard/sessions",
@@ -908,7 +979,7 @@ def test_real_offboard_reduced_px4_speed_limits(flight):
         flight.request("POST", f"/api/v1/drones/{drone_id}/flight/offboard/sessions/{session['session_id']}/arm",
                        expected=(202,), json={"request_id": str(uuid.uuid4())})
         seq = drive(ws, 0, 2.5)
-        seq, _, raised = command_and_pose(flight, ws, seq, created["name"], 6, up=.7)
+        seq, _, raised = command_and_pose(flight, ws, seq, created["autopilot"]["binding"]["gazebo_model"], 6, up=.7)
         assert raised["position"]["z"] > initial_alt + 1.2
     finally:
         ws.close()
@@ -990,13 +1061,13 @@ def test_real_offboard_ownership_token_delete_and_current_location_land(flight):
         drive_to_altitude(ws, seq, flight.observers[-1], initial, {"up": .6}, target_delta=2)
     finally:
         ws.close()
-    landing_start = flight.gazebo.current(created["name"])
+    landing_start = flight.gazebo.current(created["autopilot"]["binding"]["gazebo_model"])
     landing_target = flight.native_geodetic(landing_start["position"])
     flight.request("POST", f"/api/v1/drones/{drone_id}/flight/land", expected=(202,),
                    json={"request_id": str(uuid.uuid4())})
     landed = flight.wait_landed(drone_id, landing_target)
     assert landed["armed"] is False
-    landing_end = flight.gazebo.current(created["name"])
+    landing_end = flight.gazebo.current(created["autopilot"]["binding"]["gazebo_model"])
     assert math.dist((landing_start["position"]["x"], landing_start["position"]["y"], landing_start["position"]["z"]),
                      (landing_end["position"]["x"], landing_end["position"]["y"], landing_end["position"]["z"])) <= 3
     reopened = flight.request("POST", session_path, expected=(201,),
@@ -1115,7 +1186,7 @@ def test_real_mission_autonomy_and_snapshot_survive_update_delete(flight):
     for waypoint in waypoints:
         # Use trajectory samples after acceptance to confirm the original route.
         for record in flight.gazebo.records:
-            if record["name"] != created["name"]:
+            if record["name"] != created["autopilot"]["binding"]["gazebo_model"]:
                 continue
             p = record["position"]
             if math.hypot(p["x"] - waypoint["x"], p["y"] - waypoint["y"]) <= 2 and abs(p["z"] - waypoint["z"]) <= 1.5:
@@ -1155,7 +1226,7 @@ def test_real_mission_continues_after_backend_loss(flight):
 
     reached = 0
     for record in flight.gazebo.records:
-        if record["name"] != created["name"]:
+        if record["name"] != created["autopilot"]["binding"]["gazebo_model"]:
             continue
         pose = record["position"]
         target = waypoints[reached]
@@ -1166,7 +1237,7 @@ def test_real_mission_continues_after_backend_loss(flight):
                 break
     assert reached == len(waypoints), \
         f"Mission did not physically visit all waypoints during Backend outage ({reached}/4)"
-    wait_hub_landed_at_station(flight, instance_id, hub_observer, created["name"],
+    wait_hub_landed_at_station(flight, instance_id, hub_observer, created["autopilot"]["binding"]["gazebo_model"],
                                created["simulation"]["pose"]["position"])
 
 
@@ -1182,7 +1253,7 @@ def test_real_mission_rejects_stale_georeference_and_flies_changed_origin(flight
                    json={"spherical_coordinates": changed})
     created = flight.create_drone(timeout=120)
     attitude = flight.observers[-1].telemetry(required=("attitude",))["attitude"]
-    gazebo_yaw = math.degrees(yaw_from_pose(flight.gazebo.current(created["name"])))
+    gazebo_yaw = math.degrees(yaw_from_pose(flight.gazebo.current(created["autopilot"]["binding"]["gazebo_model"])))
     expected_yaw = 90 - changed["heading_deg"] - gazebo_yaw
     yaw_error = (attitude["yaw_deg"] - expected_yaw + 180) % 360 - 180
     assert abs(yaw_error) < 15, f"PX4 heading disagrees with Gazebo before arm: {yaw_error:.1f} degrees"
@@ -1199,7 +1270,7 @@ def test_real_mission_rejects_stale_georeference_and_flies_changed_origin(flight
         json={"mission_id": mission["id"], "revision": mission["revision"], "request_id": str(uuid.uuid4())}).json()
     state, _ = flight.wait_execution(created["id"], accepted["execution_id"], "completed", MISSION_TIMEOUT)
     assert state["status"] == "completed"
-    pose_records = [r["position"] for r in flight.gazebo.records if r["name"] == created["name"]]
+    pose_records = [r["position"] for r in flight.gazebo.records if r["name"] == created["autopilot"]["binding"]["gazebo_model"]]
     reached = 0
     for pose in pose_records:
         waypoint = points[reached]
@@ -1211,7 +1282,7 @@ def test_real_mission_rejects_stale_georeference_and_flies_changed_origin(flight
     assert reached == len(points), f"Changed-origin route physically reached {reached}/4 waypoints in order"
     assert flight.wait_landed(created["id"], flight.native_geodetic(created["simulation"]["pose"]["position"]))["armed"] is False
     ground = created["simulation"]["pose"]["position"]
-    landed_pose = flight.gazebo.current(created["name"])["position"]
+    landed_pose = flight.gazebo.current(created["autopilot"]["binding"]["gazebo_model"])["position"]
     assert math.hypot(landed_pose["x"] - ground["x"], landed_pose["y"] - ground["y"]) <= 3, landed_pose
 
 

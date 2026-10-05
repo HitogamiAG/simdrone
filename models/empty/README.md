@@ -35,7 +35,7 @@ Z=0,292 м, центр площадки под дроном, yaw берётся 
 ```sh
 ~/Downloads/blender-5.2.2-linux-x64/blender --background models/empty/empty.blend --python models/empty/export.py
 ~/Downloads/blender-5.2.2-linux-x64/blender --background models/empty/empty.blend --python models/empty/verify.py
-docker run --rm --entrypoint gz -v "$PWD/worlds:/worlds:ro" uav-gazebo-service:local sdf -k /worlds/empty.sdf
+docker run --rm --entrypoint gz -e SDF_PATH=/opt/uav/models -v "$PWD/worlds:/worlds:ro" uav-gazebo-service:local sdf -k /worlds/empty.sdf
 ```
 
 Редактировать исходник, затем экспортировать. Поддерживается центрированная
