@@ -10,9 +10,10 @@ import './App.css'
 import MapView, { type MapManifest } from './MapView'
 import { worldGlbUrl, worldManifestUrl } from './mapAssets'
 import { realtimeClient, type RealtimeEnvelope } from './realtime'
+import LogsPanel from './LogsPanel'
 import TelemetryPanel from './TelemetryPanel'
 
-type Resource = { id: string; name: string; spawn_pad_id?: string; status?: string; binding?: { generation?: number }; simulation?: { pose?: { position?: { x: number; y: number; z: number }; orientation?: { x: number; y: number; z: number; w: number } } }; [key: string]: unknown }
+type Resource = { id: string; name: string; spawn_pad_id?: string; status?: string; binding?: { generation?: number }; autopilot?: { status?: string }; simulation?: { pose?: { position?: { x: number; y: number; z: number }; orientation?: { x: number; y: number; z: number; w: number } } }; [key: string]: unknown }
 type SpawnPad = { id: string; name: string; model: string; availability: 'available' | 'occupied' | 'unavailable'; assigned_drone_id: string | null; unavailable_reason: string | null; surface_pose: { position: { x: number; y: number; z: number } }; spawn_pose: { position: { x: number; y: number; z: number }; orientation: { x: number; y: number; z: number; w: number } }; supported_models: string[] }
 type SpawnPadCatalog = { world: string; world_generation: number; coordinate_system: string; units: string; pads: SpawnPad[] }
 type FloatingWindow = { id: string; drone: string; kind: 'telemetry' | 'video' | 'logs' | 'manual'; minimized: boolean; x: number; y: number; width: number; height: number; z: number }
@@ -52,6 +53,7 @@ function Workbench() {
   const [layers, setLayers] = useState({ drones: true, routes: true, pads: true, grid: true })
   const [poses, setPoses] = useState<Record<string, RealtimeEnvelope>>({})
   const [telemetry, setTelemetry] = useState<Record<string, Record<string, RealtimeEnvelope>>>({})
+  const [logs, setLogs] = useState<Record<string, RealtimeEnvelope[]>>({})
   const { selectedDrone, setSelectedDrone, view, setView, windows, openWindow, patchWindow, closeWindow } = useWorkspace()
   const status = useQuery({ queryKey: ['status'], queryFn: () => get<Record<string, unknown>>('/api/v1/system/status'), ...queryOptions })
   const world = useQuery({ queryKey: ['world'], queryFn: () => get<Record<string, unknown>>('/api/v1/world'), ...queryOptions })
@@ -95,6 +97,22 @@ function Workbench() {
     }))
     return () => cleanups.forEach((cleanup) => cleanup())
   }, [telemetryDroneIds])
+  const logDroneKeys = JSON.stringify([...new Set(windows.filter((item) => item.kind === 'logs').map((item) => item.drone))].flatMap((id) => {
+    const drone = droneRows.find((item) => item.id === id)
+    return drone?.autopilot?.status === 'running' ? [[id, drone.binding?.generation ?? null] as const] : []
+  }))
+  useEffect(() => {
+    const entries = JSON.parse(logDroneKeys) as Array<[string, number | null]>
+    const cleanups = entries.map(([id, generation]) => realtimeClient.subscribe(`drone.${id}.logs`, (envelope) => {
+      if (generation !== null && envelope.runtime_generation !== undefined && envelope.runtime_generation !== generation) return
+      if (envelope.type === 'invalidated') {
+        setLogs((current) => { const next = { ...current }; delete next[id]; return next })
+        return
+      }
+      setLogs((current) => ({ ...current, [id]: [...(current[id] ?? []), envelope].slice(-2000) }))
+    }))
+    return () => cleanups.forEach((cleanup) => cleanup())
+  }, [logDroneKeys])
   const servicesOk = status.isSuccess && !status.isError
   const padRows = spawnPads.data?.pads ?? []
   const selectedPad = padRows.find((pad) => pad.id === selectedPadId) ?? null
@@ -211,7 +229,7 @@ function Workbench() {
         {padPickerMode && <div className="map-pick-hint" onClick={(event) => event.stopPropagation()}>Выберите площадку на карте <Button size="compact-xs" variant="subtle" onClick={() => { setPadPickerMode(false); droneModal.open() }}>Отмена</Button></div>}
         {droneMenu && <div className="drone-context-menu" style={{ left: Math.min(droneMenu.x, window.innerWidth - 220), top: Math.min(droneMenu.y, window.innerHeight - 230) }} onClick={(event) => event.stopPropagation()}><Text size="xs" c="dimmed">Действия · {droneRows.find((drone) => drone.id === droneMenu.id)?.name ?? droneMenu.id}</Text>{(['telemetry', 'video', 'logs', 'manual'] as const).map((kind) => <Button key={kind} variant="subtle" size="xs" fullWidth onClick={() => { openWindow(droneMenu.id, kind); setDroneMenu(null) }}>{windowTitle[kind]}</Button>)}{(['RTL', 'Посадка', 'Настройки', 'Reset', 'Удалить'] as const).map((label) => <Button key={label} variant="subtle" size="xs" fullWidth disabled title="Действие ещё не подключено">{label}</Button>)}</div>}
         <div className="floating-windows">{windows.map((window) => <Rnd key={window.id} bounds="parent" minWidth={window.kind === 'manual' ? 400 : 300} minHeight={window.kind === 'manual' ? 380 : 220} size={{ width: window.width, height: window.minimized ? 42 : window.height }} position={{ x: window.x, y: window.y }} style={{ zIndex: window.z }} onDragStop={(_, data) => patchWindow(window.id, { x: data.x, y: data.y })} onResizeStop={(_, __, ref, ___, position) => patchWindow(window.id, { width: ref.offsetWidth, height: ref.offsetHeight, ...position })} onMouseDown={() => patchWindow(window.id, { z: Math.max(0, ...windows.map((item) => item.z)) + 1 })} dragHandleClassName="window-titlebar">
-            <div className="floating-window"><header className="window-titlebar"><div><Text size="sm" fw={600}>{windowTitle[window.kind]}</Text><Text size="xs" c="dimmed">{window.drone}</Text></div><Group gap={4}><ActionIcon size="sm" variant="subtle" aria-label="Свернуть окно" onClick={() => patchWindow(window.id, { minimized: !window.minimized })}>{window.minimized ? <IconMaximize size={14} /> : <IconMinus size={14} />}</ActionIcon><ActionIcon size="sm" variant="subtle" aria-label="Закрыть окно" onClick={() => closeWindow(window.id)}><IconX size={14} /></ActionIcon></Group></header>{!window.minimized && <div className="window-content">{window.kind === 'video' ? <div className="video-placeholder"><IconVideo /><Text size="sm" c="dimmed">Видео подключается через WHEP</Text></div> : window.kind === 'logs' ? <Text size="sm" c="dimmed">Ожидание сообщений…</Text> : window.kind === 'manual' ? <Text size="sm" c="dimmed">Захват управления · WASD / RF / QE</Text> : <TelemetryPanel pose={poses[window.drone]?.runtime_generation === droneRows.find((drone) => drone.id === window.drone)?.binding?.generation ? poses[window.drone] : undefined} samples={Object.fromEntries(Object.entries(telemetry[window.drone] ?? {}).filter(([, sample]) => sample.runtime_generation === droneRows.find((drone) => drone.id === window.drone)?.binding?.generation))} />}</div>}</div>
+            <div className="floating-window"><header className="window-titlebar"><div><Text size="sm" fw={600}>{windowTitle[window.kind]}</Text><Text size="xs" c="dimmed">{window.drone}</Text></div><Group gap={4}><ActionIcon size="sm" variant="subtle" aria-label="Свернуть окно" onClick={() => patchWindow(window.id, { minimized: !window.minimized })}>{window.minimized ? <IconMaximize size={14} /> : <IconMinus size={14} />}</ActionIcon><ActionIcon size="sm" variant="subtle" aria-label="Закрыть окно" onClick={() => closeWindow(window.id)}><IconX size={14} /></ActionIcon></Group></header>{!window.minimized && <div className="window-content">{window.kind === 'video' ? <div className="video-placeholder"><IconVideo /><Text size="sm" c="dimmed">Видео подключается через WHEP</Text></div> : window.kind === 'logs' ? <LogsPanel entries={logs[window.drone] ?? []} available={droneRows.find((drone) => drone.id === window.drone)?.autopilot?.status === 'running'} onClear={() => setLogs((current) => ({ ...current, [window.drone]: [] }))} /> : window.kind === 'manual' ? <Text size="sm" c="dimmed">Захват управления · WASD / RF / QE</Text> : <TelemetryPanel pose={poses[window.drone]?.runtime_generation === droneRows.find((drone) => drone.id === window.drone)?.binding?.generation ? poses[window.drone] : undefined} samples={Object.fromEntries(Object.entries(telemetry[window.drone] ?? {}).filter(([, sample]) => sample.runtime_generation === droneRows.find((drone) => drone.id === window.drone)?.binding?.generation))} />}</div>}</div>
           </Rnd>)}</div>
         <div className="window-dock">{windows.map((window) => <Button key={window.id} size="xs" variant="default" onClick={() => patchWindow(window.id, { minimized: false, z: Math.max(...windows.map((item) => item.z)) + 1 })}>{windowTitle[window.kind]} · {window.drone}</Button>)}</div>
       </section>
