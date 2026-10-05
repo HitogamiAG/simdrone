@@ -2,6 +2,7 @@
 import math
 import threading
 import time
+from datetime import datetime, timezone
 from ..errors import ApiFault
 from ..geometry import Pose, Quaternion, Vector3
 from gz.msgs10.pose_pb2 import Pose as _PoseMessage  # registers the nested Pose type for Transport deserialization
@@ -27,7 +28,8 @@ class PoseTracker:
                     return
                 self.sequence += 1
                 for pose in msg.pose:
-                    self.poses[pose.id] = (self.from_proto(pose), self.sequence)
+                    self.poses[pose.id] = (self.from_proto(pose), self.sequence, time.monotonic(),
+                                           datetime.now(timezone.utc).isoformat())
                 self.condition.notify_all()
         if not self.client.subscribe(Pose_V, self.client.service("pose/info"), callback):
             raise RuntimeError("Cannot subscribe to Gazebo pose/info")
@@ -42,6 +44,17 @@ class PoseTracker:
                     return value[0].model_copy(deep=True)
                 self.condition.wait(max(0, deadline - time.monotonic()))
         raise ApiFault(504, "pose_timeout", "Gazebo did not publish a current pose", {"entity_id": entity_id})
+
+    def latest(self, entity_id):
+        """Return a non-blocking copy of the newest pose and its source age."""
+        with self.condition:
+            value = self.poses.get(entity_id)
+            if value is None:
+                return None
+            pose, sequence, received_mono, received_at = value
+            return {"pose": pose.model_copy(deep=True), "sequence": sequence,
+                    "age_s": max(0.0, time.monotonic() - received_mono),
+                    "received_at": received_at}
 
     def stop(self):
         if self._subscribed:

@@ -1,8 +1,10 @@
 from fastapi.testclient import TestClient
 import asyncio
+import time
 from pathlib import Path
 from types import SimpleNamespace
 import pytest
+import threading
 
 from app.api.schemas import WorldPatch
 from app.geometry import Pose, Quaternion, Vector3
@@ -90,6 +92,26 @@ def test_pose_confirmation_checks_rotation_and_accepts_equivalent_quaternions():
     equivalent = base.model_copy(deep=True)
     equivalent.orientation.w = -1
     assert PoseTracker.matches(base, equivalent)
+
+
+def test_pose_tracker_latest_is_nonblocking_fresh_and_returns_a_copy():
+    tracker = PoseTracker.__new__(PoseTracker)
+    tracker.condition = threading.Condition()
+    tracker.poses = {17: (Pose(position=Vector3(x=1, y=2, z=3),
+                               orientation=Quaternion(x=0, y=0, z=0, w=1)),
+                          8, time.monotonic(), "2026-10-05T00:00:00+00:00")}
+    sample = tracker.latest(17)
+    assert sample["sequence"] == 8
+    assert sample["age_s"] >= 0
+    assert sample["received_at"] == "2026-10-05T00:00:00+00:00"
+    sample["pose"].position.x = 99
+    assert tracker.latest(17)["pose"].position.x == 1
+    assert tracker.latest(18) is None
+
+
+def test_pose_websocket_route_is_available():
+    assert any(getattr(route, "path", "") == "/api/v1/drones/{drone_id}/pose/stream"
+               and getattr(route, "name", "") == "drone_pose_stream" for route in app.routes)
 
 
 def test_world_state_reads_components_instead_of_initial_sdf():

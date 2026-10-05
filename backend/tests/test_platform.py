@@ -1,9 +1,11 @@
 import asyncio
+import json
 
 import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app, create_app
+from app.api import world_map
 from app.errors import BackendError
 from app.schemas import DroneCreate, ParameterPatch, Pose, Vector3
 from app.service import Platform
@@ -297,3 +299,34 @@ def test_autopilot_restart_invalidates_realtime_before_closing_hub_stream():
         assert events == [("invalidate", drone["id"]), ("restart", drone["autopilot"]["id"])]
         assert p.drones[drone["id"]].status == "ready"
     asyncio.run(run())
+
+
+def test_world_map_reports_missing_manifest(monkeypatch, tmp_path):
+    monkeypatch.setenv("WORLD_MAP_MANIFEST", str(tmp_path / "absent.json"))
+    assert asyncio.run(world_map()) == {"available": False, "reason": "world_model_missing"}
+
+
+def test_world_map_returns_package_metadata_only(monkeypatch, tmp_path):
+    manifest = {
+        "package_id": "field-a", "version": "1.0.0", "world_name": "field_a",
+        "coordinate_system": "gazebo_xyz_m_z_up", "model": "world.glb",
+        "bounds": {"min": [0, 0, 0], "max": [10, 10, 5]},
+        "gazebo_to_glb": {"translation": [0, 0, 0]}, "control_points": [],
+        "large_geometry": "must not be returned",
+    }
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    monkeypatch.setenv("WORLD_MAP_MANIFEST", str(path))
+
+    result = asyncio.run(world_map())
+
+    assert result["available"] is True
+    assert result["package_id"] == "field-a"
+    assert "large_geometry" not in result
+
+
+def test_world_map_rejects_invalid_manifest(monkeypatch, tmp_path):
+    path = tmp_path / "manifest.json"
+    path.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("WORLD_MAP_MANIFEST", str(path))
+    assert asyncio.run(world_map()) == {"available": False, "reason": "world_model_manifest_invalid"}

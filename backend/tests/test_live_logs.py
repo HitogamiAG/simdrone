@@ -71,3 +71,37 @@ def test_log_shared_upstream_no_replay_and_generation_cleanup():
         assert upstreams["world.logs"].closed
         assert not realtime.channels
     asyncio.run(run())
+
+
+def test_pose_channel_shares_upstream_and_preserves_source_freshness():
+    async def run():
+        item = SimpleNamespace(id="public-drone", gazebo_id="gazebo-drone", generation=4,
+                               status="ready")
+        platform = SimpleNamespace(drones={item.id: item}, world_generation=2)
+        realtime = Realtime(platform)
+        upstreams = {}
+        async def upstream(channel):
+            stream = upstreams[channel] = Upstream()
+            return stream, item
+        realtime._upstream = upstream
+        channel = f"drone.{item.id}.pose"
+        first = await realtime.subscribe(channel)
+        second = await realtime.subscribe(channel)
+        assert len(upstreams) == 1
+        source = {"type": "pose", "sequence": 42, "age_s": 0.01,
+                  "world_generation": 3,
+                  "received_at": "2026-10-05T00:00:00+00:00",
+                  "pose": {"position": {"x": 1, "y": 2, "z": 3},
+                           "orientation": {"x": 0, "y": 0, "z": 0, "w": 1}}}
+        upstreams[channel].messages.put_nowait(json.dumps(source))
+        first_value, second_value = await asyncio.gather(
+            asyncio.wait_for(first.get(), 2), asyncio.wait_for(second.get(), 2))
+        assert first_value["drone_id"] == item.id
+        assert first_value["runtime_generation"] == item.generation
+        assert first_value["data"] == source
+        assert second_value["data"]["sequence"] == 42
+        await realtime.invalidate_drone(item.id)
+        assert (await first.get())["type"] == "invalidated"
+        assert (await second.get())["type"] == "invalidated"
+        assert not realtime.channels
+    asyncio.run(run())

@@ -42,8 +42,11 @@ Compose проверяет `/healthz`, ожидая запуска мира. `se
 | GET / PATCH | `/api/v1/drones/{drone-id}/sensors/{sensor-id}/` | Чтение / изменение частоты |
 | POST | `/api/v1/drones/{drone-id}/sensors/{sensor-id}/reset` | Восстановление исходной частоты и очистка кеша |
 | WebSocket | `/api/v1/drones/{drone-id}/sensors/{sensor-id}/stream` | Измерения обычного сенсора |
+| WebSocket | `/api/v1/drones/{drone-id}/pose/stream` | Кешированная поза Gazebo не чаще 10 раз в секунду |
 | POST | `/api/v1/drones/{drone-id}/sensors/{sensor-id}/activate` | Запуск видеопубликации камеры |
 | POST | `/api/v1/drones/{drone-id}/sensors/{sensor-id}/deactivate` | Остановка видеопубликации камеры |
+
+Поток поз использует уже работающую общую подписку Gazebo Transport `/world/{world}/pose/info`: HTTP handler читает только последний кешированный образец, не ждёт Gazebo Transport и ограничивает передачу 10 сообщениями в секунду. Событие содержит публичный Gazebo drone ID, entity ID, world generation, sequence, возраст образца, UTC `received_at` и полный XYZ/quaternion. Если источник pose/info временно недоступен или модель не найдена, WebSocket закрывается и клиенту следует перечитать состояние дрона и подписаться заново. Это внутренний транспортный контракт между Backend и Gazebo Service, не прямой endpoint для браузера.
 
 Pause/resume и activate/deactivate идемпотентны. Создание дрона возвращает HTTP `201`. API-id дрона отделён от `entity_id` Gazebo; идентификатор сенсора используется в пределах своего дрона.
 

@@ -1,10 +1,32 @@
 import asyncio
+import json
+import os
+from pathlib import Path
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from .errors import BackendError
 from .schemas import (DroneCreate, ParameterPatch, SensorPatch, WorldPatch,
                       MissionCreate, MissionUpdate, MissionRun, FlightRequest)
 
 router = APIRouter()
+
+
+@router.get("/api/v1/world/map")
+async def world_map():
+    """Return the static map package identity, without serving its geometry."""
+    manifest_path = Path(os.getenv("WORLD_MAP_MANIFEST", "/world-model/manifest.json"))
+    if not manifest_path.is_file():
+        return {"available": False, "reason": "world_model_missing"}
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"available": False, "reason": "world_model_manifest_invalid"}
+    required = ("package_id", "version", "world_name", "coordinate_system", "model")
+    if not isinstance(manifest, dict) or any(key not in manifest for key in required):
+        return {"available": False, "reason": "world_model_manifest_invalid"}
+    return {"available": True, **{key: manifest[key] for key in required},
+            "bounds": manifest.get("bounds"),
+            "gazebo_to_glb": manifest.get("gazebo_to_glb"),
+            "control_points": manifest.get("control_points", [])}
 
 
 @router.get("/api/v1/missions/")

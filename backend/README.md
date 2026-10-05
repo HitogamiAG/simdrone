@@ -59,6 +59,8 @@ World-reset/reboot не создаёт runtime-дроны снова: Backend и
 
 ## Realtime и видео
 
+`GET /api/v1/world/map` отдаёт identity статического Blender-пакета карты без передачи геометрии. Backend читает JSON manifest по `WORLD_MAP_MANIFEST` (по умолчанию `/world-model/manifest.json`), проверяет наличие `package_id`, `version`, `world_name`, `coordinate_system` и `model`, и возвращает `available: true`, эти поля, а также `bounds`, `gazebo_to_glb` и `control_points`, если они заданы. При отсутствии файла возвращается `available: false, reason: world_model_missing`; при некорректном JSON/контракте — `world_model_manifest_invalid`. Compose монтирует `./world-model` read-only в `/world-model`; директория пока не поставляется, поэтому карта frontend должна сообщать о блокировке. Геометрия остаётся статическим локальным browser asset.
+
 WebSocket принимает, например:
 
 ```json
@@ -66,6 +68,8 @@ WebSocket принимает, например:
 ```
 
 Backend разделяет одну upstream-подписку между клиентами канала; клиентский mailbox сохраняет последнее сообщение каждого типа. Сообщения содержат публичный ID, channel/type, UTC-время получения, world/runtime generations и исходное время только когда оно присутствует. Reset инвалидирует старый поток и буферы; клиент получает `invalidated` и подписывается заново. Число подписок на соединение ограничено.
+
+Для положения дронов используется канал `drone.PUBLIC_ID.pose`. Backend открывает один upstream WebSocket Gazebo Service для всех подписчиков канала; сервис раз в 100 мс выдаёт pose из уже существующей Transport-подписки. В realtime `data` содержит XYZ/quaternion, Gazebo entity ID, source sequence, возраст образца и время его получения сервисом. `received_at` envelope — время получения Backend. Reset и удаление инвалидируют поток; Backend не интерполирует и не прогнозирует координаты. Новая подписка требует доступной Gazebo-модели, но не работающего PX4.
 
 Видео публикуется по внутреннему MediaMTX пути с Gazebo ID, а Backend возвращает WHEP URL. Первый WHEP-зритель запускает camera activate через on-demand hook, последний останавливает. React-клиент должен создать `RTCPeerConnection`, добавить `recvonly` video transceiver, отправить SDP offer методом POST на WHEP URL и установить SDP answer. Кадры камер через общий WebSocket не передаются.
 

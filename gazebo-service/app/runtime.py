@@ -169,6 +169,25 @@ class RuntimeCoordinator:
             pass
         return {"process_alive": process_alive, "world_ready": transport_ready, "world": self.settings.world_name, "pid": self.process_manager.process.pid if process_alive else None}
 
+    def drone_pose_sample(self, gazebo_drone_id: str):
+        """Read a mapped drone pose from the cached pose/info subscription."""
+        with self.lock:
+            record = next((drone for drone in self.drones.values()
+                           if drone.gazebo_model == gazebo_drone_id or drone.id == gazebo_drone_id), None)
+            if record is None:
+                raise ApiFault(404, "drone_not_found", "Drone was not found")
+            tracker, entity_id, world_generation = self.pose_tracker, record.entity_id, self.generation
+            public_id, name = record.id, record.name
+        if tracker is None or entity_id is None:
+            raise ApiFault(503, "pose_unavailable", "Gazebo pose subscription is unavailable")
+        sample = tracker.latest(entity_id)
+        if sample is None:
+            raise ApiFault(503, "pose_unavailable", "Gazebo has not published a pose for this drone")
+        return {"type": "pose", "drone_id": public_id, "name": name,
+                "entity_id": entity_id, "world_generation": world_generation,
+                "sequence": sample["sequence"], "age_s": sample["age_s"],
+                "received_at": sample["received_at"], "pose": sample["pose"].model_dump()}
+
     def reboot(self):
         with self.lock:
             self.generation += 1
