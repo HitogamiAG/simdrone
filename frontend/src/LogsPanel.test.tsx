@@ -22,4 +22,10 @@ describe('LogsPanel', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Очистить' }))
     expect(onClear).toHaveBeenCalledOnce()
   })
+
+  it('labels the Gazebo world log source separately', () => {
+    render(<MantineProvider><LogsPanel entries={[]} available onClear={vi.fn()} scope="Gazebo logs" /></MantineProvider>)
+    expect(screen.getByText('Gazebo logs')).toBeInTheDocument()
+    expect(screen.getByRole('log', { name: 'Логи Gazebo' })).toBeInTheDocument()
+  })
 })

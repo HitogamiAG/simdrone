@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Accordion, ActionIcon, Badge, Button, Group, Modal, NumberInput, Stack, Text, TextInput, Tooltip, MantineProvider } from '@mantine/core'
 import { useDisclosure } from '@mantine/hooks'
 import { Notifications, notifications } from '@mantine/notifications'
@@ -13,6 +13,10 @@ import { realtimeClient, type RealtimeEnvelope } from './realtime'
 import LogsPanel from './LogsPanel'
 import TelemetryPanel from './TelemetryPanel'
 import VideoPanel from './VideoPanel'
+import ManualPanel from './ManualPanel'
+import DroneSettingsModal from './DroneSettingsModal'
+import WorldSettingsModal from './WorldSettingsModal'
+import MissionFlightModal from './MissionFlightModal'
 
 type Resource = { id: string; name: string; spawn_pad_id?: string; status?: string; binding?: { generation?: number }; autopilot?: { status?: string }; simulation?: { pose?: { position?: { x: number; y: number; z: number }; orientation?: { x: number; y: number; z: number; w: number } } }; [key: string]: unknown }
 type SpawnPad = { id: string; name: string; model: string; availability: 'available' | 'occupied' | 'unavailable'; assigned_drone_id: string | null; unavailable_reason: string | null; surface_pose: { position: { x: number; y: number; z: number } }; spawn_pose: { position: { x: number; y: number; z: number }; orientation: { x: number; y: number; z: number; w: number } }; supported_models: string[] }
@@ -43,6 +47,7 @@ const queryOptions = { retry: 1, refetchInterval: 5000, staleTime: 2000 }
 
 function Workbench() {
   const [collapsed, setCollapsed] = useState(false)
+  const [windowLayoutRestored, setWindowLayoutRestored] = useState(false)
   const [active, setActive] = useState<string[]>(['drones', 'missions'])
   const [createDroneOpen, droneModal] = useDisclosure(false)
   const [padPickerMode, setPadPickerMode] = useState(false)
@@ -55,6 +60,15 @@ function Workbench() {
   const [missionSaving, setMissionSaving] = useState(false)
   const [missionError, setMissionError] = useState<string | null>(null)
   const [missionConflict, setMissionConflict] = useState(false)
+  const [routeEditing, setRouteEditing] = useState(false)
+  const [missionFlightOpen, setMissionFlightOpen] = useState(false)
+  const [droneSettingsId, setDroneSettingsId] = useState<string | null>(null)
+  const [worldSettingsOpen, setWorldSettingsOpen] = useState(false)
+  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false)
+  const [pendingAction, setPendingAction] = useState<{ droneId: string; action: 'reset' | 'delete' } | null>(null)
+  const [pendingWindowClose, setPendingWindowClose] = useState<FloatingWindow | null>(null)
+  const [actionBusy, setActionBusy] = useState(false)
+  const [actionError, setActionError] = useState<string | null>(null)
   const queryClient = useQueryClient()
   const [viewFollow, setViewFollow] = useState(false)
   const [mapZoom, setMapZoom] = useState(1)
@@ -63,6 +77,8 @@ function Workbench() {
   const [poses, setPoses] = useState<Record<string, RealtimeEnvelope>>({})
   const [telemetry, setTelemetry] = useState<Record<string, Record<string, RealtimeEnvelope>>>({})
   const [logs, setLogs] = useState<Record<string, RealtimeEnvelope[]>>({})
+  const pendingLogs = useRef<Record<string, RealtimeEnvelope[]>>({})
+  const logFlushTimer = useRef<number | null>(null)
   const { selectedDrone, setSelectedDrone, view, setView, windows, openWindow, patchWindow, closeWindow } = useWorkspace()
   const status = useQuery({ queryKey: ['status'], queryFn: () => get<Record<string, unknown>>('/api/v1/system/status'), ...queryOptions })
   const world = useQuery({ queryKey: ['world'], queryFn: () => get<Record<string, unknown>>('/api/v1/world'), ...queryOptions })
@@ -75,6 +91,39 @@ function Workbench() {
 
   const droneRows = useMemo(() => Array.isArray(drones.data) ? drones.data : [], [drones.data])
   const missionRows = useMemo(() => Array.isArray(missions.data) ? missions.data : [], [missions.data])
+  useEffect(() => {
+    if (!drones.isSuccess || windowLayoutRestored) return
+    const droneIds = new Set(droneRows.map((drone) => drone.id))
+    const minimums = { telemetry: [300, 240], video: [320, 220], logs: [360, 220], manual: [400, 380] } as const
+    try {
+      const stored = JSON.parse(localStorage.getItem('simdrone.window-layout.v1') ?? '[]') as unknown
+      const restored = Array.isArray(stored) ? stored.filter((item): item is FloatingWindow => {
+        if (!item || typeof item !== 'object') return false
+        const window = item as Partial<FloatingWindow>
+        if (!window.drone || (!(window.drone === 'world' && window.kind === 'logs') && !droneIds.has(window.drone)) || !window.id || !['telemetry', 'video', 'logs', 'manual'].includes(window.kind ?? '')) return false
+        return [window.x, window.y, window.width, window.height, window.z].every((value) => typeof value === 'number' && Number.isFinite(value))
+      }).map((window) => {
+        const [minWidth, minHeight] = minimums[window.kind]
+        return { ...window, width: Math.max(minWidth, window.width), height: Math.max(minHeight, window.height), minimized: Boolean(window.minimized) }
+      }) : []
+      useWorkspace.setState({ windows: restored })
+    } catch { useWorkspace.setState({ windows: [] }) }
+    queueMicrotask(() => setWindowLayoutRestored(true))
+  }, [drones.isSuccess, droneRows, windowLayoutRestored])
+  useEffect(() => {
+    if (windowLayoutRestored) localStorage.setItem('simdrone.window-layout.v1', JSON.stringify(windows))
+  }, [windows, windowLayoutRestored])
+  useEffect(() => {
+    if (!windowLayoutRestored) return
+    const clamp = () => {
+      const bounds = document.querySelector('.map-stage')?.getBoundingClientRect()
+      if (!bounds) return
+      useWorkspace.setState((state) => ({ windows: state.windows.map((window) => ({ ...window, x: Math.max(0, Math.min(window.x, Math.max(0, bounds.width - 96))), y: Math.max(0, Math.min(window.y, Math.max(0, bounds.height - 42))) })) }))
+    }
+    window.addEventListener('resize', clamp)
+    const frame = window.requestAnimationFrame(clamp)
+    return () => { window.cancelAnimationFrame(frame); window.removeEventListener('resize', clamp) }
+  }, [collapsed, windowLayoutRestored])
   const missionDirty = Boolean(missionDraftState && (missionDraftState.id ? JSON.stringify(missionDraftState) !== JSON.stringify(missionRows.find((row) => row.id === missionDraftState.id) ? missionDraft(missionRows.find((row) => row.id === missionDraftState.id)!) : null) : true))
   const poseDroneKeys = droneRows.filter((drone) => !['creating', 'resetting', 'deleting', 'failed'].includes(drone.status ?? '')).map((drone) => [drone.id, drone.binding?.generation ?? null] as const)
   const poseDroneIds = JSON.stringify(poseDroneKeys)
@@ -108,22 +157,39 @@ function Workbench() {
     return () => cleanups.forEach((cleanup) => cleanup())
   }, [telemetryDroneIds])
   const logDroneKeys = JSON.stringify([...new Set(windows.filter((item) => item.kind === 'logs').map((item) => item.drone))].flatMap((id) => {
+    if (id === 'world') return [[id, null] as const]
     const drone = droneRows.find((item) => item.id === id)
     return drone?.autopilot?.status === 'running' ? [[id, drone.binding?.generation ?? null] as const] : []
   }))
   useEffect(() => {
     const entries = JSON.parse(logDroneKeys) as Array<[string, number | null]>
-    const cleanups = entries.map(([id, generation]) => realtimeClient.subscribe(`drone.${id}.logs`, (envelope) => {
+    const cleanups = entries.map(([id, generation]) => realtimeClient.subscribe(id === 'world' ? 'world.logs' : `drone.${id}.logs`, (envelope) => {
       if (generation !== null && envelope.runtime_generation !== undefined && envelope.runtime_generation !== generation) return
       if (envelope.type === 'invalidated') {
+        delete pendingLogs.current[id]
         setLogs((current) => { const next = { ...current }; delete next[id]; return next })
         return
       }
-      setLogs((current) => ({ ...current, [id]: [...(current[id] ?? []), envelope].slice(-2000) }))
+      pendingLogs.current[id] = [...(pendingLogs.current[id] ?? []), envelope].slice(-2000)
+      if (logFlushTimer.current === null) logFlushTimer.current = window.setTimeout(() => {
+        const additions = pendingLogs.current
+        pendingLogs.current = {}
+        logFlushTimer.current = null
+        setLogs((current) => {
+          const next = { ...current }
+          for (const [droneId, messages] of Object.entries(additions)) next[droneId] = [...(current[droneId] ?? []), ...messages].slice(-2000)
+          return next
+        })
+      }, 100)
     }))
     return () => cleanups.forEach((cleanup) => cleanup())
   }, [logDroneKeys])
-  const servicesOk = status.isSuccess && !status.isError
+  useEffect(() => () => { if (logFlushTimer.current !== null) window.clearTimeout(logFlushTimer.current) }, [])
+  const statusBackend = status.data?.backend as { ready?: boolean; world_configuration?: { ready?: boolean; reason?: string } | null } | undefined
+  const servicesOk = status.isSuccess && statusBackend?.ready === true && statusBackend.world_configuration?.ready === true &&
+    (status.data?.gazebo as { available?: boolean } | undefined)?.available === true &&
+    (status.data?.px4_hub as { available?: boolean } | undefined)?.available === true &&
+    (status.data?.mediamtx as { available?: boolean } | undefined)?.available === true
   const padRows = spawnPads.data?.pads ?? []
   const selectedPad = padRows.find((pad) => pad.id === selectedPadId) ?? null
   const availablePads = padRows.filter((pad) => pad.availability === 'available' && pad.supported_models.includes('x500_gimbal'))
@@ -145,9 +211,10 @@ function Workbench() {
   const beginMission = () => {
     setMissionError(null); setMissionConflict(false)
     setMissionDraftState({ name: `Миссия ${missionRows.length + 1}`, world: String(world.data?.name ?? 'empty'), waypoints: [{ x: 0, y: 0, z: 10 }], cruise_speed_m_s: 2, takeoff_height_m: 10, return_height_m: 10 })
+    setRouteEditing(false)
   }
   const editMission = (mission: Mission) => {
-    setMissionError(null); setMissionConflict(false); setMissionDraftState(missionDraft(mission))
+    setMissionError(null); setMissionConflict(false); setMissionDraftState(missionDraft(mission)); setRouteEditing(false)
   }
   const patchMission = (patch: Partial<MissionDraft>) => setMissionDraftState((draft) => draft ? { ...draft, ...patch } : draft)
   const saveMission = async () => {
@@ -212,6 +279,42 @@ function Workbench() {
     }
   }
 
+  const runLifecycleAction = async () => {
+    if (!pendingAction || actionBusy) return
+    const { droneId, action } = pendingAction
+    setActionBusy(true); setActionError(null)
+    try {
+      const response = await fetch(`/api/v1/drones/${encodeURIComponent(droneId)}${action === 'reset' ? '/reset' : '/'}`, {
+        method: action === 'delete' ? 'DELETE' : 'POST',
+      })
+      const result = await response.json().catch(() => null) as { error?: { message?: string } } | null
+      if (!response.ok) throw new Error(result?.error?.message ?? `HTTP ${response.status}`)
+      if (action === 'delete') {
+        for (const item of windows.filter((window) => window.drone === droneId)) closeWindow(item.id)
+        if (selectedDrone === droneId) setSelectedDrone(null)
+      }
+      if (action === 'reset' || action === 'delete') await Promise.all([queryClient.invalidateQueries({ queryKey: ['drones'] }), queryClient.invalidateQueries({ queryKey: ['spawn-pads'] })])
+      else await queryClient.invalidateQueries({ queryKey: ['drones'] })
+      setPendingAction(null)
+      notifications.show({ color: 'green', title: 'Команда принята', message: 'Backend принял запрос. Наблюдайте фактическое состояние в списке и телеметрии.' })
+    } catch (reason) { setActionError(reason instanceof Error ? reason.message : 'Операция не подтверждена') }
+    finally { setActionBusy(false) }
+  }
+  const sendFlightAction = async (droneId: string, action: 'return' | 'land') => {
+    try {
+      const response = await fetch(`/api/v1/drones/${encodeURIComponent(droneId)}/flight/${action}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ request_id: crypto.randomUUID() }) })
+      const result = await response.json().catch(() => null) as { error?: { message?: string } } | null
+      if (!response.ok) throw new Error(result?.error?.message ?? `HTTP ${response.status}`)
+      await queryClient.invalidateQueries({ queryKey: ['drones'] })
+      notifications.show({ color: 'green', title: 'Команда принята', message: 'Результат полёта отслеживается по телеметрии и состоянию PX4.' })
+    } catch (reason) { notifications.show({ color: 'red', title: 'Команда не принята', message: reason instanceof Error ? reason.message : 'Backend недоступен' }) }
+  }
+
+  const refreshAfterWorldOperation = async () => {
+    setWorldSettingsOpen(false); setSelectedDrone(null); useWorkspace.setState({ windows: [] })
+    await queryClient.invalidateQueries()
+  }
+
   const windowTitle: Record<FloatingWindow['kind'], string> = { telemetry: 'Телеметрия', video: 'Видео', logs: 'Логи', manual: 'Ручное управление' }
   return <div className="app-shell">
     <aside className={`control-panel ${collapsed ? 'is-collapsed' : ''}`}>
@@ -230,7 +333,7 @@ function Workbench() {
               <Group justify="space-between" mb="xs"><Text size="xs" c="dimmed">РЕСУРСЫ МИРА</Text><ActionIcon size="sm" aria-label="Создать дрон" onClick={() => { setCreateDroneError(null); setSelectedPadId(null); droneModal.open(); void spawnPads.refetch() }}><IconCirclePlus size={17} /></ActionIcon></Group>
               {drones.isLoading && <Text size="sm" c="dimmed">Загрузка…</Text>}
               {drones.isError && <InlineError message="Backend недоступен" onRetry={() => void drones.refetch()} />}
-              {droneRows.map((drone) => <div className={`resource-row ${selectedDrone === drone.id ? 'selected' : ''}`} key={drone.id} onClick={() => { setSelectedDrone(drone.id); setFocusWorld(false) }} onContextMenu={(event) => { event.preventDefault(); setSelectedDrone(drone.id); openWindow(drone.id, 'telemetry') }}>
+              {droneRows.map((drone) => <div className={`resource-row ${selectedDrone === drone.id ? 'selected' : ''}`} key={drone.id} onClick={() => { setSelectedDrone(drone.id); setFocusWorld(false) }} onContextMenu={(event) => { event.preventDefault(); setSelectedDrone(drone.id); setDroneMenu({ id: drone.id, x: event.clientX, y: event.clientY }) }}>
                 <span className="drone-dot" /><div className="resource-main"><Text size="sm" fw={600}>{drone.name || drone.id}</Text><Text size="xs" c="dimmed">{String(drone.status ?? 'Состояние неизвестно')} · площадка {drone.spawn_pad_id ?? 'не указана'}</Text></div><Badge size="xs" variant="outline" color="gray">PX4</Badge>
               </div>)}
               {!droneRows.length && !drones.isLoading && !drones.isError && <EmptyHint text="В мире пока нет дронов" />}
@@ -246,20 +349,22 @@ function Workbench() {
                 <Group grow><NumberInput size="xs" label="Скорость, м/с" min={0.1} max={3} step={0.1} decimalScale={1} value={missionDraftState.cruise_speed_m_s} onChange={(value) => patchMission({ cruise_speed_m_s: Number(value) })} /><NumberInput size="xs" label="Взлёт, м" min={0.1} max={100} value={missionDraftState.takeoff_height_m} onChange={(value) => patchMission({ takeoff_height_m: Number(value) })} /></Group>
                 <NumberInput size="xs" label="Высота возврата, м" min={0.1} max={100} value={missionDraftState.return_height_m} onChange={(value) => patchMission({ return_height_m: Number(value) })} />
                 <Group justify="space-between"><Text size="xs" fw={600}>Маршрут · {missionDraftState.waypoints.length} точек</Text><Button size="compact-xs" variant="default" disabled={missionDraftState.waypoints.length >= 500} onClick={() => patchMission({ waypoints: [...missionDraftState.waypoints, { ...missionDraftState.waypoints.at(-1)! }] })}>Добавить</Button></Group>
+                <Button size="xs" variant={routeEditing ? 'light' : 'default'} disabled={!mapReady} onClick={() => setRouteEditing((enabled) => !enabled)}>{routeEditing ? 'Завершить добавление на карте' : 'Добавлять точки кликом по карте'}</Button>
                 {missionDraftState.waypoints.map((point, index) => <div className="waypoint-row" key={index}><Text size="xs" c="dimmed">{index + 1}</Text>{(['x', 'y', 'z'] as const).map((axis) => <NumberInput key={axis} size="xs" aria-label={`Точка ${index + 1} ${axis.toUpperCase()}`} value={point[axis]} decimalScale={2} onChange={(value) => { const waypoints = missionDraftState.waypoints.map((item, itemIndex) => itemIndex === index ? { ...item, [axis]: Number(value) } : item); patchMission({ waypoints }) }} />)}<Group gap={2}><ActionIcon size="sm" variant="subtle" aria-label={`Точку ${index + 1} выше`} disabled={index === 0} onClick={() => { const waypoints = [...missionDraftState.waypoints]; [waypoints[index - 1], waypoints[index]] = [waypoints[index], waypoints[index - 1]]; patchMission({ waypoints }) }}>↑</ActionIcon><ActionIcon size="sm" variant="subtle" aria-label={`Удалить точку ${index + 1}`} disabled={missionDraftState.waypoints.length <= 1} onClick={() => patchMission({ waypoints: missionDraftState.waypoints.filter((_, itemIndex) => itemIndex !== index) })}><IconX size={14} /></ActionIcon></Group></div>)}
                 {missionError && <Text role="alert" size="xs" c="red">{missionError}</Text>}
                 {missionConflict && <Button size="compact-xs" variant="default" onClick={() => void reloadMission()}>Перечитать серверную редакцию</Button>}
-                <Group grow><Button size="xs" variant="default" onClick={() => setMissionDraftState(null)}>Закрыть</Button><Button size="xs" loading={missionSaving} disabled={!missionDirty || !missionDraftState.name.trim() || missionDraftState.waypoints.some((point) => ![point.x, point.y, point.z].every(Number.isFinite)) || missionDraftState.cruise_speed_m_s <= 0 || missionDraftState.cruise_speed_m_s > 3 || missionDraftState.takeoff_height_m <= 0 || missionDraftState.return_height_m <= 0} onClick={() => void saveMission()}>{missionDraftState.id ? 'Сохранить' : 'Создать'}</Button></Group>
+                {missionDraftState.id && !missionDirty && <Button size="xs" variant="light" onClick={() => setMissionFlightOpen(true)}>Проверить / запустить…</Button>}
+                <Group grow><Button size="xs" variant="default" onClick={() => { setMissionDraftState(null); setRouteEditing(false) }}>Закрыть</Button><Button size="xs" loading={missionSaving} disabled={!missionDirty || !missionDraftState.name.trim() || missionDraftState.waypoints.some((point) => ![point.x, point.y, point.z].every(Number.isFinite)) || missionDraftState.cruise_speed_m_s <= 0 || missionDraftState.cruise_speed_m_s > 3 || missionDraftState.takeoff_height_m <= 0 || missionDraftState.return_height_m <= 0} onClick={() => void saveMission()}>{missionDraftState.id ? 'Сохранить' : 'Создать'}</Button></Group>
               </Stack>}
             </Accordion.Panel></Accordion.Item>
             <Accordion.Item value="world"><Accordion.Control icon={<IconSettings size={17} />}>Настройки мира</Accordion.Control><Accordion.Panel>
               <Text size="sm" fw={600}>{String(world.data?.name ?? 'Gazebo')}</Text><Text size="xs" c="dimmed" mb="sm">{world.data?.simulation && typeof world.data.simulation === 'object' && 'paused' in world.data.simulation ? (world.data.simulation.paused ? 'Симуляция на паузе' : 'Симуляция выполняется') : 'Состояние недоступно'}</Text>
               <Group grow><Button size="xs" variant="default" disabled={!servicesOk || Boolean((world.data?.simulation as { paused?: boolean } | undefined)?.paused)} leftSection={<IconPlayerPause size={14} />} onClick={() => void setSimulation('pause')}>Пауза</Button><Button size="xs" variant="default" disabled={!servicesOk || !(world.data?.simulation as { paused?: boolean } | undefined)?.paused} leftSection={<IconPlayerPlay size={14} />} onClick={() => void setSimulation('resume')}>Продолжить</Button></Group>
-              <Text size="xs" c="dimmed" mt="sm">Сброс и перезапуск будут доступны с подтверждением.</Text>
+              <Group grow mt="sm"><Button size="xs" variant="default" onClick={() => openWindow('world', 'logs')}>Логи мира</Button><Button size="xs" variant="default" onClick={() => setWorldSettingsOpen(true)}>Настройки, сброс и reboot…</Button></Group>
             </Accordion.Panel></Accordion.Item>
           </Accordion>
         </div>
-        <button className="service-status" onClick={() => void status.refetch()}><span className={`status-dot ${servicesOk ? 'online' : 'offline'}`} /><span>{status.isLoading ? 'Проверка сервисов…' : servicesOk ? 'Сервисы доступны' : 'Нет связи с Backend'}</span><IconAntennaBars5 size={16} /></button>
+        <button className="service-status" onClick={() => { setDiagnosticsOpen(true); void status.refetch() }}><span className={`status-dot ${servicesOk ? 'online' : 'offline'}`} /><span>{status.isLoading ? 'Проверка сервисов…' : servicesOk ? 'Сервисы доступны' : 'Нет связи с Backend'}</span><IconAntennaBars5 size={16} /></button>
       </>}
     </aside>
 
@@ -273,18 +378,41 @@ function Workbench() {
         <div className="map-toolbar map-toolbar-right">
           {Object.entries({ drones: layers.drones, routes: layers.routes, pads: layers.pads, grid: layers.grid }).map(([key, enabled]) => <Button key={key} size="xs" variant={enabled ? 'light' : 'default'} onClick={() => setLayers({ ...layers, [key]: !enabled })}>{key === 'drones' ? 'Дроны' : key === 'routes' ? 'Маршруты' : key === 'pads' ? 'Площадки' : 'Сетка'}</Button>)}
         </div>
-        {mapReady && localMap.data && <MapView view={view} zoom={mapZoom} focus={cameraFocus} follow={viewFollow} manifest={localMap.data} pads={padRows} drones={mapDrones} route={layers.routes ? missionDraftState?.waypoints ?? [] : []} selectedDrone={selectedDrone} showPads={layers.pads} showDrones={layers.drones} showGrid={layers.grid} onSelectDrone={(drone) => { setSelectedDrone(drone.id); setFocusWorld(false); setDroneMenu(null) }} onSelectPad={(pad) => { setSelectedPadId(pad.id); setFocusWorld(false); setCreateDroneError(null); setPadPickerMode(false); droneModal.open() }} onDroneContext={(drone, x, y) => { setSelectedDrone(drone.id); setFocusWorld(false); setDroneMenu({ id: drone.id, x, y }) }} onPointerMissed={() => { if (padPickerMode) { setPadPickerMode(false); droneModal.open() } }} />}
+        {mapReady && localMap.data && <MapView view={view} zoom={mapZoom} focus={cameraFocus} follow={viewFollow} manifest={localMap.data} pads={padRows} drones={mapDrones} route={layers.routes ? missionDraftState?.waypoints ?? [] : []} routeEditing={routeEditing} selectedDrone={selectedDrone} showPads={layers.pads} showDrones={layers.drones} showGrid={layers.grid} onAddRoutePoint={(point) => { if (!missionDraftState) return; const z = missionDraftState.waypoints.at(-1)?.z ?? 10; patchMission({ waypoints: [...missionDraftState.waypoints, { ...point, z }] }) }} onMoveRoutePoint={(index, x, y) => { if (missionDraftState) patchMission({ waypoints: missionDraftState.waypoints.map((point, itemIndex) => itemIndex === index ? { ...point, x, y } : point) }) }} onSelectDrone={(drone) => { setSelectedDrone(drone.id); setFocusWorld(false); setDroneMenu(null) }} onSelectPad={(pad) => { setSelectedPadId(pad.id); setFocusWorld(false); setCreateDroneError(null); setPadPickerMode(false); droneModal.open() }} onDroneContext={(drone, x, y) => { setSelectedDrone(drone.id); setFocusWorld(false); setDroneMenu({ id: drone.id, x, y }) }} onPointerMissed={() => { if (padPickerMode) { setPadPickerMode(false); droneModal.open() } }} />}
         {!mapReady && <div className="map-prerequisite"><IconMap2 size={34} stroke={1.4} /><Text fw={600} mt="md">{map.isError || localMap.isError || localGlb.isError ? 'Не удалось загрузить пакет участка' : map.data?.available && !localMatchesBackend ? 'Пакет карты не совпадает с Backend' : map.data?.available ? 'Загрузка модели участка…' : 'Пакет участка не подключён'}</Text><Text size="sm" c="dimmed" ta="center" maw={440}>{map.isError || localMap.isError || localGlb.isError ? 'Проверьте локальную поставку world.glb/manifest и доступность Backend.' : map.data?.available && !localMatchesBackend ? `Backend: ${String(map.data.package_id)} ${String(map.data.version)}; браузер: ${localMap.data?.package_id ?? 'manifest недоступен'} ${localMap.data?.version ?? ''}.` : 'Карта появится после загрузки локального Blender-пакета и сверки его версии с Backend.'}</Text><Badge variant="outline" color="yellow" mt="sm">Карта и управление полётом заблокированы</Badge></div>}
         {selectedDrone && <div className="selected-drone-chip"><span className="drone-dot" /><div><Text size="sm" fw={600}>Выбранный дрон</Text><Text size="xs" c="dimmed">{selectedDrone} · {selectedPoseCurrent ? `обновлено ${String(selectedPoseEnvelope?.data?.age_s ?? '—')} с назад` : 'ожидание позы'}</Text></div><ActionIcon variant="subtle" aria-label="Открыть телеметрию" onClick={() => openWindow(selectedDrone, 'telemetry')}><IconActivity size={16} /></ActionIcon></div>}
         <div className="coordinate-readout">XYZ Gazebo · м <span>{formatPosition(selectedPose ?? null)}</span></div>
         {padPickerMode && <div className="map-pick-hint" onClick={(event) => event.stopPropagation()}>Выберите площадку на карте <Button size="compact-xs" variant="subtle" onClick={() => { setPadPickerMode(false); droneModal.open() }}>Отмена</Button></div>}
-        {droneMenu && <div className="drone-context-menu" style={{ left: Math.min(droneMenu.x, window.innerWidth - 220), top: Math.min(droneMenu.y, window.innerHeight - 230) }} onClick={(event) => event.stopPropagation()}><Text size="xs" c="dimmed">Действия · {droneRows.find((drone) => drone.id === droneMenu.id)?.name ?? droneMenu.id}</Text>{(['telemetry', 'video', 'logs', 'manual'] as const).map((kind) => <Button key={kind} variant="subtle" size="xs" fullWidth onClick={() => { openWindow(droneMenu.id, kind); setDroneMenu(null) }}>{windowTitle[kind]}</Button>)}{(['RTL', 'Посадка', 'Настройки', 'Reset', 'Удалить'] as const).map((label) => <Button key={label} variant="subtle" size="xs" fullWidth disabled title="Действие ещё не подключено">{label}</Button>)}</div>}
+        {droneMenu && <div className="drone-context-menu" style={{ left: Math.min(droneMenu.x, window.innerWidth - 220), top: Math.min(droneMenu.y, window.innerHeight - 330) }} onClick={(event) => event.stopPropagation()}><Text size="xs" c="dimmed">Действия · {droneRows.find((drone) => drone.id === droneMenu.id)?.name ?? droneMenu.id}</Text>{(['telemetry', 'video', 'logs', 'manual'] as const).map((kind) => <Button key={kind} variant="subtle" size="xs" fullWidth disabled={kind === 'manual' && !mapReady} title={kind === 'manual' && !mapReady ? 'Нужен согласованный пакет карты' : undefined} onClick={() => { openWindow(droneMenu.id, kind); setDroneMenu(null) }}>{windowTitle[kind]}</Button>)}<Button variant="subtle" size="xs" fullWidth onClick={() => { setDroneSettingsId(droneMenu.id); setDroneMenu(null) }}>Настройки / PX4 / сенсоры</Button><Button variant="subtle" size="xs" fullWidth onClick={() => { void sendFlightAction(droneMenu.id, 'return'); setDroneMenu(null) }}>Возврат (RTL)</Button><Button variant="subtle" size="xs" fullWidth onClick={() => { void sendFlightAction(droneMenu.id, 'land'); setDroneMenu(null) }}>Посадка</Button>{(['reset', 'delete'] as const).map((action) => <Button key={action} variant="subtle" color="red" size="xs" fullWidth onClick={() => { setPendingAction({ droneId: droneMenu.id, action }); setActionError(null); setDroneMenu(null) }}>{action === 'reset' ? 'Сбросить дрон' : 'Удалить дрон'}</Button>)}</div>}
         <div className="floating-windows">{windows.map((window) => <Rnd key={window.id} bounds="parent" minWidth={window.kind === 'manual' ? 400 : window.kind === 'video' ? 320 : window.kind === 'logs' ? 360 : 300} minHeight={window.kind === 'manual' ? 380 : window.kind === 'telemetry' ? 240 : 220} size={{ width: window.width, height: window.minimized ? 42 : window.height }} position={{ x: window.x, y: window.y }} style={{ zIndex: window.z }} onDragStop={(_, data) => patchWindow(window.id, { x: data.x, y: data.y })} onResizeStop={(_, __, ref, ___, position) => patchWindow(window.id, { width: ref.offsetWidth, height: ref.offsetHeight, ...position })} onMouseDown={() => patchWindow(window.id, { z: Math.max(0, ...windows.map((item) => item.z)) + 1 })} dragHandleClassName="window-titlebar">
-            <div className="floating-window"><header className="window-titlebar"><div><Text size="sm" fw={600}>{windowTitle[window.kind]}</Text><Text size="xs" c="dimmed">{window.drone}</Text></div><Group gap={4}><ActionIcon size="sm" variant="subtle" aria-label="Свернуть окно" onClick={() => patchWindow(window.id, { minimized: !window.minimized })}>{window.minimized ? <IconMaximize size={14} /> : <IconMinus size={14} />}</ActionIcon><ActionIcon size="sm" variant="subtle" aria-label="Закрыть окно" onClick={() => closeWindow(window.id)}><IconX size={14} /></ActionIcon></Group></header>{!window.minimized && <div className="window-content">{window.kind === 'video' ? <VideoPanel droneId={window.drone} /> : window.kind === 'logs' ? <LogsPanel entries={logs[window.drone] ?? []} available={droneRows.find((drone) => drone.id === window.drone)?.autopilot?.status === 'running'} onClear={() => setLogs((current) => ({ ...current, [window.drone]: [] }))} /> : window.kind === 'manual' ? <Text size="sm" c="dimmed">Захват управления · WASD / RF / QE</Text> : <TelemetryPanel pose={poses[window.drone]?.runtime_generation === droneRows.find((drone) => drone.id === window.drone)?.binding?.generation ? poses[window.drone] : undefined} samples={Object.fromEntries(Object.entries(telemetry[window.drone] ?? {}).filter(([, sample]) => sample.runtime_generation === droneRows.find((drone) => drone.id === window.drone)?.binding?.generation))} />}</div>}</div>
+            <div className="floating-window"><header className="window-titlebar"><div><Text size="sm" fw={600}>{windowTitle[window.kind]}</Text><Text size="xs" c="dimmed">{window.drone === 'world' ? 'Gazebo · мир' : droneRows.find((drone) => drone.id === window.drone)?.name ?? window.drone}</Text></div><Group gap={4}><ActionIcon size="sm" variant="subtle" aria-label="Свернуть окно" onClick={() => patchWindow(window.id, { minimized: !window.minimized })}>{window.minimized ? <IconMaximize size={14} /> : <IconMinus size={14} />}</ActionIcon><ActionIcon size="sm" variant="subtle" aria-label="Закрыть окно" onClick={() => window.kind === 'manual' ? setPendingWindowClose(window) : closeWindow(window.id)}><IconX size={14} /></ActionIcon></Group></header>{!window.minimized && <div className="window-content">{window.kind === 'video' ? <VideoPanel droneId={window.drone} /> : window.kind === 'logs' ? <LogsPanel entries={logs[window.drone] ?? []} available={window.drone === 'world' || droneRows.find((drone) => drone.id === window.drone)?.autopilot?.status === 'running'} scope={window.drone === 'world' ? 'Gazebo logs' : 'PX4 logs'} onClear={() => { delete pendingLogs.current[window.drone]; setLogs((current) => ({ ...current, [window.drone]: [] })) }} /> : window.kind === 'manual' ? <ManualPanel droneId={window.drone} enabled={mapReady} /> : <TelemetryPanel pose={poses[window.drone]?.runtime_generation === droneRows.find((drone) => drone.id === window.drone)?.binding?.generation ? poses[window.drone] : undefined} samples={Object.fromEntries(Object.entries(telemetry[window.drone] ?? {}).filter(([, sample]) => sample.runtime_generation === droneRows.find((drone) => drone.id === window.drone)?.binding?.generation))} />}</div>}</div>
           </Rnd>)}</div>
-        <div className="window-dock">{windows.map((window) => <Button key={window.id} size="xs" variant="default" onClick={() => patchWindow(window.id, { minimized: false, z: Math.max(...windows.map((item) => item.z)) + 1 })}>{windowTitle[window.kind]} · {window.drone}</Button>)}</div>
+        <div className="window-dock">{windows.map((window) => <Button key={window.id} size="xs" variant="default" onClick={() => patchWindow(window.id, { minimized: false, z: Math.max(...windows.map((item) => item.z)) + 1 })}>{windowTitle[window.kind]} · {window.drone === 'world' ? 'Gazebo' : window.drone}</Button>)}</div>
       </section>
     </main>
+    <DroneSettingsModal droneId={droneSettingsId} onClose={() => setDroneSettingsId(null)} onChanged={(closeWindows = false) => { if (closeWindows && droneSettingsId) for (const item of windows.filter((window) => window.drone === droneSettingsId)) closeWindow(item.id); void Promise.all([queryClient.invalidateQueries({ queryKey: ['drones'] }), queryClient.invalidateQueries({ queryKey: ['spawn-pads'] })]) }} />
+    <WorldSettingsModal opened={worldSettingsOpen} droneCount={droneRows.length} onClose={() => setWorldSettingsOpen(false)} onChanged={() => void refreshAfterWorldOperation()} />
+    <MissionFlightModal mission={missionDraftState?.id && missionDraftState.revision ? { id: missionDraftState.id, name: missionDraftState.name, revision: missionDraftState.revision, waypoints: missionDraftState.waypoints } : null} drones={droneRows} opened={missionFlightOpen} mapReady={mapReady} paused={Boolean((world.data?.simulation as { paused?: boolean } | undefined)?.paused)} onClose={() => setMissionFlightOpen(false)} />
+    <Modal opened={diagnosticsOpen} onClose={() => setDiagnosticsOpen(false)} title="Диагностика сервисов" centered>
+      <Stack>
+        {(['backend', 'gazebo', 'px4_hub', 'mediamtx'] as const).map((service) => {
+          const detail = status.data?.[service] as Record<string, unknown> | undefined
+          const worldConfig = service === 'backend' ? detail?.world_configuration as { ready?: boolean; reason?: string } | null | undefined : undefined
+          const available = service === 'backend' ? detail?.ready === true && worldConfig?.ready === true : detail?.available === true
+          const unmanagedDrones = detail?.unmanaged_drones
+          const unmanagedInstances = detail?.unmanaged_instances
+          return <Group key={service} justify="space-between" align="flex-start"><div><Text size="sm" fw={600}>{service === 'px4_hub' ? 'PX4 Hub' : service === 'mediamtx' ? 'MediaMTX' : service === 'gazebo' ? 'Gazebo' : 'Backend'}</Text><Text size="xs" c="dimmed">{String(detail?.error ?? worldConfig?.reason ?? detail?.reason ?? (service === 'backend' ? detail?.operation ?? 'API отвечает' : ''))}</Text>{Array.isArray(unmanagedDrones) && unmanagedDrones.length > 0 && <Text size="xs" c="yellow">Неучтённые модели: {JSON.stringify(unmanagedDrones)}</Text>}{Array.isArray(unmanagedInstances) && unmanagedInstances.length > 0 && <Text size="xs" c="yellow">Неучтённые PX4: {JSON.stringify(unmanagedInstances)}</Text>}</div><Badge color={available ? 'green' : 'red'}>{available ? 'Доступен' : 'Недоступен'}</Badge></Group>
+        })}
+        <Text size="xs" c="dimmed">Backend отвечает отдельно от готовности каждого сервиса. Операция: {String((status.data?.backend as Record<string, unknown> | undefined)?.operation ?? 'нет')}.</Text>
+        <Button size="xs" variant="default" onClick={() => void status.refetch()}>Обновить диагностику</Button>
+      </Stack>
+    </Modal>
+    <Modal opened={Boolean(pendingAction)} onClose={() => { if (!actionBusy) { setPendingAction(null); setActionError(null) } }} title={pendingAction?.action === 'delete' ? 'Удалить дрон?' : 'Сбросить дрон?'} centered>
+      <Stack><Text size="sm">{pendingAction?.action === 'delete' ? 'Gazebo-модель и PX4 будут удалены. После подтверждённого удаления площадка освободится.' : 'Модель и PX4 будут пересозданы. Дрон вернётся на исходную позу закреплённой площадки; параметры сенсоров и PX4 сбросятся.'}</Text>{actionError && <Text size="sm" c="red">{actionError}</Text>}<Group justify="flex-end"><Button variant="default" disabled={actionBusy} onClick={() => setPendingAction(null)}>Отмена</Button><Button color="red" loading={actionBusy} onClick={() => void runLifecycleAction()}>Подтвердить</Button></Group></Stack>
+    </Modal>
+    <Modal opened={Boolean(pendingWindowClose)} onClose={() => setPendingWindowClose(null)} title="Закрыть ручное управление?" centered>
+      <Stack><Text size="sm">Offboard-сессия будет закрыта. Если дрон находится в воздухе, Backend может инициировать RTL. При потере связи действуют таймеры watchdog: остановка setpoint через 0,5 с, RTL через 5 с.</Text><Group justify="flex-end"><Button variant="default" onClick={() => setPendingWindowClose(null)}>Остаться</Button><Button color="red" onClick={() => { if (pendingWindowClose) closeWindow(pendingWindowClose.id); setPendingWindowClose(null) }}>Закрыть сессию</Button></Group></Stack>
+    </Modal>
     <Modal opened={createDroneOpen} onClose={() => { if (!creatingDrone) { droneModal.close(); setCreateDroneError(null) } }} title="Создать дрон" centered>
       <Stack>
         <TextInput label="Имя" value={droneName} onChange={(event) => setDroneName(event.currentTarget.value)} maxLength={63} error={invalidDroneName ? 'Начните с латинской буквы; далее допустимы буквы, цифры, _ и - (до 63 символов).' : undefined} />

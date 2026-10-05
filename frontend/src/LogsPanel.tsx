@@ -4,13 +4,14 @@ import type { RealtimeEnvelope } from './realtime'
 
 type LogEntry = RealtimeEnvelope & { data?: Record<string, unknown> }
 
-export default function LogsPanel({ entries, available, onClear }: { entries: LogEntry[]; available: boolean; onClear: () => void }) {
+export default function LogsPanel({ entries, available, onClear, scope = 'PX4 logs' }: { entries: LogEntry[]; available: boolean; onClear: () => void; scope?: string }) {
   const [paused, setPaused] = useState(false)
   const [frozen, setFrozen] = useState<LogEntry[] | null>(null)
   const [search, setSearch] = useState('')
   const bottom = useRef<HTMLDivElement>(null)
   const visible = paused ? frozen ?? entries : entries
-  const filtered = visible.filter((entry) => String(entry.data?.message ?? entry.message ?? '').toLowerCase().includes(search.toLowerCase()))
+  const matches = visible.filter((entry) => String(entry.data?.message ?? entry.message ?? '').toLowerCase().includes(search.toLowerCase()))
+  const filtered = search ? matches : matches.slice(-250)
 
   useEffect(() => {
     if (!paused) bottom.current?.scrollIntoView?.({ block: 'end' })
@@ -22,9 +23,9 @@ export default function LogsPanel({ entries, available, onClear }: { entries: Lo
       <Button size="compact-xs" variant={paused ? 'light' : 'default'} onClick={() => { if (paused) { setPaused(false); setFrozen(null) } else { setFrozen(entries); setPaused(true) } }}>{paused ? 'Продолжить' : 'Пауза'}</Button>
       <Button size="compact-xs" variant="default" onClick={() => { onClear(); if (paused) setFrozen([]) }}>Очистить</Button>
     </Group>
-    <div className="logs-status"><Badge size="xs" variant="outline" color={available ? 'green' : 'yellow'}>{available ? 'PX4 logs' : 'PX4 не запущен'}</Badge><Text size="xs" c="dimmed">{entries.length}/2000 строк{paused ? ' · отображение приостановлено' : ''}</Text></div>
-    {!available && <Text size="xs" c="dimmed">Поток логов доступен, когда PX4 запущен.</Text>}
-    <div className="logs-list" role="log" aria-label="Логи PX4">
+    <div className="logs-status"><Badge size="xs" variant="outline" color={available ? 'green' : 'yellow'}>{available ? scope : 'Сервис недоступен'}</Badge><Text size="xs" c="dimmed">{entries.length}/2000 строк{paused ? ' · отображение приостановлено' : ''}</Text></div>
+    {!available && <Text size="xs" c="dimmed">Поток логов сейчас недоступен.</Text>}
+    <div className="logs-list" role="log" aria-label={scope === 'PX4 logs' ? 'Логи PX4' : 'Логи Gazebo'}>
       {filtered.map((entry, index) => {
         const message = String(entry.data?.message ?? entry.message ?? (entry.type === 'gap' ? `Пропущено сообщений: ${String(entry.data?.dropped ?? '—')}` : entry.type))
         const source = String(entry.data?.source ?? 'Backend')
