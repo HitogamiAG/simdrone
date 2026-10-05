@@ -1,7 +1,7 @@
 """Allowlisted model catalog and SDF-derived sensor defaults."""
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from .config import Settings, ROOT, LOCAL_ROOT
+from .config import Settings
 
 class ModelCatalog:
     def __init__(self, settings: Settings):
@@ -23,9 +23,6 @@ class ModelCatalog:
             candidate = root / "x500_gimbal/model.sdf"
             if candidate.is_file():
                 models["x500_gimbal"] = candidate
-        test_model = ROOT / "app/models/test_quad/model.sdf"
-        local_test = LOCAL_ROOT / "app/models/test_quad/model.sdf"
-        models["test_quad"] = test_model if test_model.exists() else local_test
         return models
 
     def initial_sensor_rate(self, model_path: Path | None, sensor_name: str, initial_sdf: str | None = None):
@@ -36,7 +33,7 @@ class ModelCatalog:
                     return float(sensor.findtext("update_rate", "0"))
         pending = [model_path] if model_path else []
         visited = set()
-        roots = [*self.settings.model_roots, ROOT / "app/models", LOCAL_ROOT / "app/models"]
+        roots = self.settings.model_roots
         while pending:
             path = pending.pop()
             resolved = path.resolve()

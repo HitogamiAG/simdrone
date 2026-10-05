@@ -101,6 +101,8 @@ PATCH мира не является транзакцией. Если поздн
 
 `model` — ключ установленного каталога; произвольные пути и загрузка SDF через API не принимаются. Имя и поза необязательны: по умолчанию генерируется имя, позиция равна `(0,0,1)`, ориентация единичная. Поставляются `test_quad`, `x500_gimbal` и модели из закреплённого PX4-gazebo-models.
 
+Каталог и поиск включённых моделей используют только `MODEL_ROOTS`. Скрытых дополнительных каталогов сервиса нет; при переопределении `MODEL_ROOTS` модель `test_quad` доступна только если присутствует в выбранном каталоге.
+
 Поза задаётся при создании и сохраняется как начальная поза для drone-reset. Публичного перемещения существующего дрона нет: после создания им управляет симуляция. GET дрона, список и позы моделей в GET мира используют актуальные позы из Gazebo.
 
 При drone-reset публичное имя дрона и `drone_id` сохраняются, но внутреннее имя модели Gazebo меняется. Это изолирует топики сенсоров новой модели от publishers удалённой модели, которые Gazebo может кратковременно сохранять после удаления. Поле `gazebo_model` в ответе — фактическое имя runtime-сущности; клиенты должны использовать его для прямого наблюдения Gazebo, а `name` остаётся стабильным логическим именем.
@@ -174,7 +176,7 @@ docker compose exec -T gazebo-service ffmpeg \
 
 | Параметры | Назначение |
 | --- | --- |
-| `WORLD_FILE`, `WORLD_NAME` | SDF из `gazebo-service/app/worlds` и имя мира внутри него |
+| `WORLD_FILE`, `WORLD_NAME` | SDF из корневой `worlds/` и имя мира внутри него |
 | `API_PORT`, `RTSP_PORT`, `RTP_PORT`, `RTCP_PORT`, `HLS_PORT`, `WEBRTC_PORT`, `WEBRTC_UDP_PORT` | Публикуемые Compose порты |
 | `WEBRTC_ALLOWED_ORIGIN`, `WEBRTC_ADDITIONAL_HOSTS`, `WEBRTC_IPS_FROM_INTERFACES` | Origin браузера и ICE адреса, публикуемые MediaMTX |
 | `GZ_PARTITION` | Изоляция Gazebo Transport |
@@ -184,7 +186,7 @@ docker compose exec -T gazebo-service ffmpeg \
 | `MEDIAMTX_API_USER`, `MEDIAMTX_API_PASSWORD` | Доступ сервиса к API MediaMTX |
 | `LOG_LEVEL` | Логирование приложения |
 
-`WORLD_SDF`, `MODEL_ROOTS` и `GZ_SIM_RESOURCE_PATH` задаются в [`docker-compose.yml`](../docker-compose.yml). По умолчанию мир, `x500_gimbal`, `gimbal_camera`, meshes и Gazebo World-клиент входят в этот репозиторий под `gazebo-service/app`; `model://x500` берётся из закреплённого PX4-gazebo-models, загружаемого при сборке образа. Gazebo Service не использует внешний каталог исходников. Для собственного размещения SDF или каталога нужно менять также пути/тома Compose. Формат RTSP URL учитывает опубликованный `RTSP_PORT`; адрес читателя по умолчанию — `localhost`.
+`WORLD_SDF`, `MODEL_ROOTS` и `GZ_SIM_RESOURCE_PATH` задаются в [`docker-compose.yml`](../docker-compose.yml). Все модели и их meshes хранятся в корневой `models/`, SDF миров — в `worlds/`. Образ копирует их в `/opt/uav/models` и `/opt/uav/worlds`; скачивания моделей при сборке больше нет. Каталог PX4-gazebo-models из прежнего закреплённого commit включён в `models/` с сохранением локального `x500_gimbal`; источник и лицензия описаны в [`models/README.md`](../models/README.md). Gazebo World-клиент остаётся в `gazebo-service/app`. Gazebo Service не использует внешний каталог исходников. Для собственного размещения SDF или каталога нужно менять также пути/тома Compose. Формат RTSP URL учитывает опубликованный `RTSP_PORT`; адрес читателя по умолчанию — `localhost`.
 
 Закреплены основные зависимости:
 
@@ -258,3 +260,27 @@ docker compose exec -T gazebo-service python /opt/uav/tests/smoke.py
 Проверка 03.10.2026 в Docker: contract + live logs — **18 passed**; `regression.py` и `smoke.py` прошли. Закрытие процесса отменяет заблокированную отправку WebSocket и освобождает подписчиков.
 
 Повторная проверка live-логов 04.10.2026: contract/live-log tests — **20 passed**; реальный Gazebo stdout получен через Backend двумя подписчиками. `regression.py` и `smoke.py` прошли на обновлённом образе.
+
+## Проверка единого каталога ресурсов 05.10.2026
+
+`models/` и `worlds/` скопированы в пересобранный образ. На изолированном
+`docker-compose.flight.yml` последовательно выполнены:
+
+```sh
+docker compose -f docker-compose.flight.yml build gazebo-service backend
+docker compose -f docker-compose.flight.yml up -d --no-build gazebo-service mediamtx
+docker compose -f docker-compose.flight.yml exec -T gazebo-service pytest -q /opt/uav/tests/test_contract.py
+docker compose -f docker-compose.flight.yml exec -T gazebo-service python /opt/uav/tests/regression.py
+docker compose -f docker-compose.flight.yml exec -T gazebo-service python /opt/uav/tests/smoke.py
+docker compose -f docker-compose.flight.yml exec -T gazebo-service gz sdf -k /opt/uav/worlds/empty.sdf
+```
+
+Сборка выполнена с временным build.network=host overlay из-за DNS в Docker,
+конфигурация сети приложения не изменялась. Contract: **17 passed**, regression
+и smoke прошли: текущие позы, настройки мира, sensor stream/reset, cleanup,
+восстановление камеры, world-reset и reboot; smoke декодировал H.264 RTSP.
+Проверена загрузка обоих геопривязанных плагинов через maps процесса Gazebo.
+SDF: Valid с прежним предупреждением о magnetic_field внутри physics.
+Обе Compose-конфигурации прошли config --quiet. Все 172 перенесённых upstream
+файла побайтно совпадают с закреплённым commit; исходное форматирование сохранено.
+Браузерное видео и реальные PX4-полёты в этом изменении не запускались.

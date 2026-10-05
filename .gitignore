@@ -2,3 +2,5 @@
 .env.flight
 third-party
 artifacts/flight/
+
+models/**/*.blend[0-9]*

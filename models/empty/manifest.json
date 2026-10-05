@@ -1,0 +1,135 @@
+{
+  "package_id": "simdrone-empty",
+  "version": "1.0.0",
+  "world_name": "empty",
+  "coordinate_system": "gazebo_xyz_z_up",
+  "units": "meters",
+  "model": "world.glb",
+  "source": "empty.blend",
+  "sdf": "../../worlds/empty.sdf",
+  "bounds": {
+    "min": [
+      -100.0,
+      -100.0,
+      0
+    ],
+    "max": [
+      100.0,
+      100.0,
+      0
+    ]
+  },
+  "gazebo_to_glb": [
+    [
+      1,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      1,
+      0
+    ],
+    [
+      0,
+      -1,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      0,
+      1
+    ]
+  ],
+  "glb_to_gazebo": [
+    [
+      1,
+      0,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      -1,
+      0
+    ],
+    [
+      0,
+      1,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      0,
+      1
+    ]
+  ],
+  "control_points": [
+    {
+      "name": "origin",
+      "gazebo": [
+        0,
+        0,
+        0
+      ],
+      "glb": [
+        0,
+        0,
+        0
+      ]
+    },
+    {
+      "name": "positive_x",
+      "gazebo": [
+        100.0,
+        0,
+        0
+      ],
+      "glb": [
+        100.0,
+        0,
+        0
+      ]
+    },
+    {
+      "name": "positive_y",
+      "gazebo": [
+        0,
+        100.0,
+        0
+      ],
+      "glb": [
+        0,
+        0,
+        -100.0
+      ]
+    },
+    {
+      "name": "corner",
+      "gazebo": [
+        -100.0,
+        -100.0,
+        0
+      ],
+      "glb": [
+        -100.0,
+        0,
+        100.0
+      ]
+    }
+  ],
+  "collision": "Gazebo plane (infinite); visual footprint is finite",
+  "blender_version": "5.2.2 LTS",
+  "sha256": {
+    "empty.blend": "e0baff92ea5804595778ea961ba56aad4dc14cb7f2621b2ed423ad92b13b730c",
+    "world.glb": "2ae6493f0c96f1ce41bdb3bd9bfd13f24c40720897569f08c918893a83ccc93c",
+    "../../worlds/empty.sdf": "a9bbe030319dcd078ea2d9d5df4917a3add8c7b402b4bfa10394db6b673d6d3d"
+  }
+}

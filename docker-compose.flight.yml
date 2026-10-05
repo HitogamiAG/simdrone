@@ -10,10 +10,10 @@ services:
     env_file: !reset [.env.flight]
     ports: !reset []
     environment:
-      WORLD_SDF: /opt/uav/app/worlds/empty.sdf
+      WORLD_SDF: /opt/uav/worlds/empty.sdf
       WORLD_NAME: empty
-      MODEL_ROOTS: /opt/uav/app/models:/opt/uav/models
-      GZ_SIM_RESOURCE_PATH: /opt/uav/app/models:/opt/uav/models
+      MODEL_ROOTS: /opt/uav/models
+      GZ_SIM_RESOURCE_PATH: /opt/uav/models
       GZ_PARTITION: simdrone-flight-test
 
   px4-hub:

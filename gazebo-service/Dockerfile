@@ -1,7 +1,7 @@
 FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 \
-    GZ_VERSION=harmonic GZ_PARTITION=uav-sim GZ_SIM_RESOURCE_PATH=/opt/uav/app/models:/opt/uav/models \
+    GZ_VERSION=harmonic GZ_PARTITION=uav-sim GZ_SIM_RESOURCE_PATH=/opt/uav/models \
     LIBGL_ALWAYS_SOFTWARE=1 MESA_GL_VERSION_OVERRIDE=4.5
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -18,13 +18,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/uav
-ARG PX4_MODELS_COMMIT=a15af9628536914ff7201c992fce5e3cb5d70db9
-RUN git init /tmp/PX4-gazebo-models && cd /tmp/PX4-gazebo-models && \
-    git remote add origin https://github.com/PX4/PX4-gazebo-models.git && \
-    git fetch --depth 1 origin ${PX4_MODELS_COMMIT} && git checkout FETCH_HEAD && \
-    mkdir -p /opt/uav/models && cp -a models/. /opt/uav/models/ && \
-    rm -rf /tmp/PX4-gazebo-models
-
 COPY gazebo-service/requirements.txt /opt/uav/requirements.txt
 RUN python3 -m venv --system-site-packages /opt/venv && \
     /opt/venv/bin/pip install --no-cache-dir -r requirements.txt
@@ -53,6 +46,8 @@ RUN test "$(pkg-config --modversion gz-sim8)" = "8.15.0" && \
     done && rm -rf /tmp/georeferenced-sensors /tmp/patch_georeferenced_sensors.py
 ENV GZ_SIM_SYSTEM_PLUGIN_PATH=/opt/uav/georeferenced-plugins
 
+COPY models /opt/uav/models
+COPY worlds /opt/uav/worlds
 COPY gazebo-service/app /opt/uav/app
 COPY gazebo-service/tests /opt/uav/tests
 RUN g++ -O2 -shared -std=c++17 -fPIC $(python3-config --includes) \

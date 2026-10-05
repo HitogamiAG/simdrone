@@ -13,7 +13,7 @@ router = APIRouter()
 @router.get("/api/v1/world/map")
 async def world_map():
     """Return the static map package identity, without serving its geometry."""
-    manifest_path = Path(os.getenv("WORLD_MAP_MANIFEST", "/world-model/manifest.json"))
+    manifest_path = Path(os.getenv("WORLD_MAP_MANIFEST", "/models/empty/manifest.json"))
     if not manifest_path.is_file():
         return {"available": False, "reason": "world_model_missing"}
     try:

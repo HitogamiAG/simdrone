@@ -3,13 +3,15 @@ from dataclasses import dataclass
 from pathlib import Path
 
 LOCAL_ROOT = Path(__file__).resolve().parents[1]
+if LOCAL_ROOT.name == "gazebo-service":
+    LOCAL_ROOT = LOCAL_ROOT.parent
 ROOT = Path("/opt/uav")
 
 @dataclass(frozen=True)
 class Settings:
-    world_path: Path = Path(os.getenv("WORLD_SDF", str(LOCAL_ROOT / "app/worlds/empty.sdf")))
+    world_path: Path = Path(os.getenv("WORLD_SDF", str(LOCAL_ROOT / "worlds/empty.sdf")))
     world_name: str = os.getenv("WORLD_NAME", "empty")
-    model_roots: tuple[Path, ...] = tuple(Path(item) for item in os.getenv("MODEL_ROOTS", f"{LOCAL_ROOT}/app/models:/opt/uav/models").split(":") if item)
+    model_roots: tuple[Path, ...] = tuple(Path(item) for item in os.getenv("MODEL_ROOTS", str(LOCAL_ROOT / "models")).split(":") if item)
     api_base: str = os.getenv("PUBLIC_API_URL", "http://gazebo-service:8000").rstrip("/")
     mediamtx_rtsp_host: str = os.getenv("MEDIAMTX_RTSP_HOST", "localhost")
     media_dir: Path = Path(os.getenv("MEDIA_DIR", "/tmp/gazebo-streams"))

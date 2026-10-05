@@ -23,15 +23,22 @@ from gz.msgs10.physics_pb2 import Physics
 
 def test_default_world_and_flight_models_are_bundled_in_application():
     settings = Settings()
-    assert settings.world_path == LOCAL_ROOT / "app/worlds/empty.sdf"
+    assert settings.world_path == LOCAL_ROOT / "worlds/empty.sdf"
     assert settings.world_path.is_file()
     from xml.etree import ElementTree
     world = ElementTree.parse(settings.world_path).getroot().find("world")
     assert world.findtext("gravity") == "0 0 -9.80665"
-    models = ModelCatalog(Settings(model_roots=(LOCAL_ROOT / "app/models",))).models()
-    assert models["x500_gimbal"] == LOCAL_ROOT / "app/models/x500_gimbal/model.sdf"
-    assert models["gimbal_camera"] == LOCAL_ROOT / "app/models/gimbal_camera/model.sdf"
-    assert all(path.is_file() for path in (LOCAL_ROOT / "app/models/gimbal_camera/meshes").glob("*.stl"))
+    models = ModelCatalog(Settings(model_roots=(LOCAL_ROOT / "models",))).models()
+    assert models["x500_gimbal"] == LOCAL_ROOT / "models/x500_gimbal/model.sdf"
+    assert models["gimbal_camera"] == LOCAL_ROOT / "models/gimbal_camera/model.sdf"
+    assert models["test_quad"] == LOCAL_ROOT / "models/test_quad/model.sdf"
+    assert models["x500"] == LOCAL_ROOT / "models/x500/model.sdf"
+    assert models["x500_base"] == LOCAL_ROOT / "models/x500_base/model.sdf"
+    assert "empty" not in models
+    assert ModelCatalog(Settings(model_roots=(LOCAL_ROOT / "models",))).initial_sensor_rate(
+        models["x500_gimbal"], "imu_sensor"
+    ) == 250
+    assert all(path.is_file() for path in (LOCAL_ROOT / "models/gimbal_camera/meshes").glob("*.stl"))
     from app.gazebo.world import _load_bindings
     # Gazebo Harmonic air pressure publishers use FluidPressure on Transport.
     bindings = _load_bindings()

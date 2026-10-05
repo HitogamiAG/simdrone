@@ -59,7 +59,7 @@ World-reset/reboot не создаёт runtime-дроны снова: Backend и
 
 ## Realtime и видео
 
-`GET /api/v1/world/map` отдаёт identity статического Blender-пакета карты без передачи геометрии. Backend читает JSON manifest по `WORLD_MAP_MANIFEST` (по умолчанию `/world-model/manifest.json`), проверяет наличие `package_id`, `version`, `world_name`, `coordinate_system` и `model`, и возвращает `available: true`, эти поля, а также `bounds`, `gazebo_to_glb` и `control_points`, если они заданы. При отсутствии файла возвращается `available: false, reason: world_model_missing`; при некорректном JSON/контракте — `world_model_manifest_invalid`. Compose монтирует `./world-model` read-only в `/world-model`; пакет `empty` поставляется, описание экспорта и ограничения приёмки — в [`world-model/README.md`](../world-model/README.md). Геометрия остаётся статическим локальным browser asset.
+`GET /api/v1/world/map` отдаёт identity статического Blender-пакета карты без передачи геометрии. Backend читает JSON manifest по `WORLD_MAP_MANIFEST` (по умолчанию `/models/empty/manifest.json`), проверяет наличие `package_id`, `version`, `world_name`, `coordinate_system` и `model`, и возвращает `available: true`, эти поля, а также `bounds`, `gazebo_to_glb` и `control_points`, если они заданы. При отсутствии файла возвращается `available: false, reason: world_model_missing`; при некорректном JSON/контракте — `world_model_manifest_invalid`. Compose монтирует `./models` read-only в `/models` и выбирает `/models/${WORLD_NAME:-empty}/manifest.json`; пакет `empty` поставляется, описание экспорта и ограничения приёмки — в [`models/empty/README.md`](../models/empty/README.md). Геометрия остаётся статическим локальным browser asset.
 
 WebSocket принимает, например:
 
@@ -136,3 +136,8 @@ docker run --rm --network uav-simulation -v "$PWD/backend/tests:/tests:ro" -w /t
 ```
 
 Проверка 04.10.2026: Backend unit tests **16 passed**, Gazebo contract/live-log tests **20 passed**, Hub tests **27 passed**. Сквозной `live_logs_integration.py` получил настоящие строки Gazebo и PX4 двумя клиентами, проверил pause, stop/start/restart/delete, world-reset и reboot. Также прошли Backend integration (два дрона, параметры, sensor reset, pause и world reset), realtime integration (общие клиенты и медленный читатель), Gazebo `regression.py`, Gazebo `smoke.py` и `docker compose config --quiet`. Исправлен порядок закрытия: Backend инвалидирует upstream до команд PX4/reset, чтобы зритель получил `invalidated`, а не ошибку закрывшегося сокета.
+
+Проверка переноса ресурсов 05.10.2026: образ Backend пересобран,
+`tests/test_platform.py` в Docker — **17 passed**. Прямой вызов world_map в контейнере
+с read-only томом models вернул available=true и package_id=simdrone-empty.
+Полная браузерная приёмка карты в эту проверку не входит.

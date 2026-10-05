@@ -19,9 +19,9 @@ services:
     image: uav-gazebo-service:local
     env_file: .env
     environment:
-      WORLD_SDF: /opt/uav/app/worlds/${WORLD_FILE:-empty.sdf}
-      MODEL_ROOTS: /opt/uav/app/models:/opt/uav/models
-      GZ_SIM_RESOURCE_PATH: /opt/uav/app/models:/opt/uav/models
+      WORLD_SDF: /opt/uav/worlds/${WORLD_FILE:-empty.sdf}
+      MODEL_ROOTS: /opt/uav/models
+      GZ_SIM_RESOURCE_PATH: /opt/uav/models
       GZ_PARTITION: ${GZ_PARTITION:-uav-sim}
       MEDIAMTX_RTSP_HOST: localhost
     ports:
@@ -85,10 +85,10 @@ services:
       BACKEND_STARTUP_TIMEOUT: ${BACKEND_STARTUP_TIMEOUT:-120}
       BACKEND_MAX_SUBSCRIPTIONS: ${BACKEND_MAX_SUBSCRIPTIONS:-32}
       MISSION_DB: /data/missions.sqlite3
-      WORLD_MAP_MANIFEST: /world-model/manifest.json
+      WORLD_MAP_MANIFEST: /models/${WORLD_NAME:-empty}/manifest.json
     volumes:
       - backend-missions:/data
-      - ./world-model:/world-model:ro
+      - ./models:/models:ro
     ports:
       - "${BACKEND_PORT:-8003}:8003"
     depends_on:
