@@ -13,6 +13,7 @@ from app.errors import ApiFault
 from app.entities import DroneRecord, SensorRecord
 from app.runtime import RuntimeCoordinator
 from app.gazebo.poses import PoseTracker
+from app.gazebo.poses import Pose_V
 from app.media.encoder import EncoderSession
 from app.services.subscriptions import SensorSubscription
 from app.gazebo.state import SerializedStepMap, component_id, decode_world, model_sdf
@@ -80,6 +81,13 @@ def test_spawn_pad_frames_follow_pad_yaw_and_reject_incomplete_world(tmp_path):
 def test_pose_quaternion_is_normalized():
     pose = Pose(position=Vector3(x=1, y=2, z=3), orientation=Quaternion(x=0, y=0, z=2, w=2))
     assert pose.orientation.z == pose.orientation.w == 2 ** -0.5
+
+
+def test_pose_tracker_message_resolves_nested_pose_from_canonical_package():
+    message = Pose_V()
+    message.pose.add(id=17).position.x = 1.25
+    assert message.pose[0].id == 17
+    assert message.pose[0].position.x == 1.25
 
 
 def test_zero_quaternion_is_rejected():

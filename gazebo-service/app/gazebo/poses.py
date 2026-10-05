@@ -5,8 +5,11 @@ import time
 from datetime import datetime, timezone
 from ..errors import ApiFault
 from ..geometry import Pose, Quaternion, Vector3
-from gz.msgs10.pose_pb2 import Pose as _PoseMessage  # registers the nested Pose type for Transport deserialization
-from gz.msgs10.pose_v_pb2 import Pose_V
+# Generated Pose_V schemas import their nested dependencies from ``gz.msgs``.
+# Register the nested class through that same canonical package: importing it
+# through the ``gz.msgs10`` compatibility alias leaves Pose_V.pose unresolved.
+from gz.msgs.pose_pb2 import Pose as _PoseMessage  # noqa: F401
+from gz.msgs.pose_v_pb2 import Pose_V
 
 class PoseTracker:
     def __init__(self, client, world_name: str, generation):
