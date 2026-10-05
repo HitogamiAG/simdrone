@@ -68,4 +68,30 @@ describe('workspace shell', () => {
     await waitFor(() => expect(fetchMock.mock.calls.filter(([path]) => String(path).endsWith('/world/spawn-pads')).length).toBeGreaterThan(1))
   })
 
+  it('creates and saves a mission draft with ordered XYZ waypoints', async () => {
+    const saved = { id: 'mission-1', name: 'Миссия 1', world: 'empty', revision: 1, waypoints: [{ x: 0, y: 0, z: 10 }], cruise_speed_m_s: 2, takeoff_height_m: 10, return_height_m: 10 }
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = String(input)
+      if (path.endsWith('/missions/') && init?.method === 'POST') return new Response(JSON.stringify(saved), { status: 201 })
+      const value = path.endsWith('/world/map') ? { available: false, reason: 'world_model_missing' }
+        : path.endsWith('/system/status') ? { backend: 'ok' }
+          : path.endsWith('/world') ? { name: 'empty' }
+            : []
+      return new Response(JSON.stringify(value), { status: 200 })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    render(<QueryClientProvider client={queryClient}><App /></QueryClientProvider>)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Новая миссия' }))
+    expect(screen.getByText('Черновик миссии')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Добавить' }))
+    expect(screen.getByText('Маршрут · 2 точек')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Создать' }))
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/v1/missions/', expect.objectContaining({ method: 'POST' })))
+    const request = fetchMock.mock.calls.find(([path, init]) => String(path).endsWith('/missions/') && init?.method === 'POST')?.[1]
+    expect(JSON.parse(String(request?.body))).toEqual({ name: 'Миссия 1', world: 'empty', waypoints: [{ x: 0, y: 0, z: 10 }, { x: 0, y: 0, z: 10 }], cruise_speed_m_s: 2, takeoff_height_m: 10, return_height_m: 10 })
+  })
+
 })

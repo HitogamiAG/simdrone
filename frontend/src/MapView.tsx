@@ -1,6 +1,6 @@
 import { Suspense, useEffect, useMemo } from 'react'
 import { Canvas, useFrame, useThree } from '@react-three/fiber'
-import { OrbitControls, OrthographicCamera, PerspectiveCamera, useGLTF } from '@react-three/drei'
+import { Line, OrbitControls, OrthographicCamera, PerspectiveCamera, useGLTF } from '@react-three/drei'
 import { CanvasTexture, EventDispatcher, Matrix4, MOUSE, Quaternion, Vector3 } from 'three'
 import { worldGlbUrl } from './mapAssets'
 
@@ -18,6 +18,19 @@ export type MapManifest = {
 type Pose = { position?: { x: number; y: number; z: number }; orientation?: { x: number; y: number; z: number; w: number } }
 type Pad = { id: string; name: string; availability: string; assigned_drone_id: string | null; surface_pose: Pose; spawn_pose: Pose }
 type Drone = { id: string; name: string; status?: string; spawn_pad_id?: string; simulation?: { pose?: Pose } }
+type RoutePoint = { x: number; y: number; z: number }
+
+function MissionRoute({ points }: { points: RoutePoint[] }) {
+  if (!points.length) return null
+  const vectors = points.map((point) => new Vector3(point.x, point.y, point.z))
+  return <group>
+    {vectors.length > 1 && <Line points={vectors} color="#4dabf7" lineWidth={2} />}
+    {vectors.map((point, index) => <group key={index} position={point}>
+      <mesh><sphereGeometry args={[0.14, 12, 8]} /><meshBasicMaterial color="#4dabf7" /></mesh>
+      <SpriteLabel title={`${index + 1}`} subtitle={`Z ${points[index].z.toFixed(1)} м`} color="#4dabf7" position={[0, 0, 0.32]} scale={[1.25, 0.34, 1]} />
+    </group>)}
+  </group>
+}
 
 
 function WorldModel({ manifest }: { manifest: MapManifest }) {
@@ -108,8 +121,8 @@ function CameraBehavior({ view, zoom, focus, follow }: { view: '2d' | '3d'; zoom
   return null
 }
 
-function Scene({ manifest, pads, drones, selectedDrone, view, zoom, focus, follow, showPads, showDrones, showGrid, onSelectDrone, onSelectPad, onDroneContext }: {
-  manifest: MapManifest; pads: Pad[]; drones: Drone[]; selectedDrone: string | null; view: '2d' | '3d'; zoom: number; focus: [number, number, number]; follow: boolean; showPads: boolean; showDrones: boolean; showGrid: boolean
+function Scene({ manifest, pads, drones, route, selectedDrone, view, zoom, focus, follow, showPads, showDrones, showGrid, onSelectDrone, onSelectPad, onDroneContext }: {
+  manifest: MapManifest; pads: Pad[]; drones: Drone[]; route: RoutePoint[]; selectedDrone: string | null; view: '2d' | '3d'; zoom: number; focus: [number, number, number]; follow: boolean; showPads: boolean; showDrones: boolean; showGrid: boolean
   onSelectDrone: (drone: Drone) => void; onSelectPad: (pad: Pad) => void; onDroneContext: (drone: Drone, x: number, y: number) => void
 }) {
   const orthographic = view === '2d'
@@ -123,13 +136,14 @@ function Scene({ manifest, pads, drones, selectedDrone, view, zoom, focus, follo
     <Suspense fallback={null}><WorldModel manifest={manifest} /></Suspense>
     {showGrid && <gridHelper args={[200, 40, '#454b55', '#30343b']} rotation={[Math.PI / 2, 0, 0]} position={[0, 0, 0.004]} />}
     {showPads && pads.map((pad) => <SpawnPad key={pad.id} pad={pad} onSelect={onSelectPad} />)}
+    <MissionRoute points={route} />
     {showDrones && drones.map((drone) => <DroneMarker key={drone.id} drone={drone} selected={drone.id === selectedDrone} onSelect={onSelectDrone} onContext={onDroneContext} />)}
     <OrbitControls makeDefault enablePan enableZoom enableRotate={!orthographic} mouseButtons={{ MIDDLE: MOUSE.PAN, RIGHT: MOUSE.PAN }} minPolarAngle={orthographic ? 0.001 : 0} maxPolarAngle={orthographic ? 0.001 : Math.PI} />
   </>
 }
 
 export default function MapView(props: {
-  view: '2d' | '3d'; zoom: number; focus: [number, number, number]; follow: boolean; manifest: MapManifest; pads: Pad[]; drones: Drone[]; selectedDrone: string | null; showPads: boolean; showDrones: boolean; showGrid: boolean
+  view: '2d' | '3d'; zoom: number; focus: [number, number, number]; follow: boolean; manifest: MapManifest; pads: Pad[]; drones: Drone[]; route: RoutePoint[]; selectedDrone: string | null; showPads: boolean; showDrones: boolean; showGrid: boolean
   onSelectDrone: (drone: Drone) => void; onSelectPad: (pad: Pad) => void; onDroneContext: (drone: Drone, x: number, y: number) => void; onPointerMissed: () => void
 }) {
   return <Canvas className="scene-root" onPointerMissed={props.onPointerMissed}>

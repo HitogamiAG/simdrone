@@ -13,6 +13,10 @@
 .count { margin-left: auto; padding: 1px 7px; border-radius: 9px; color: #adb5bd; background: #393d45; font-size: 11px; font-weight: 500; }
 .resource-row, .mission-row { display: flex; align-items: center; gap: 10px; min-height: 54px; padding: 8px; border-radius: 6px; border: 1px solid transparent; cursor: pointer; }
 .resource-row:hover, .mission-row:hover { background: #272a30; }
+.mission-row { width: 100%; color: inherit; text-align: left; background: transparent; font: inherit; }
+.mission-row.selected { background: #272a30; border-color: #393d45; }
+.mission-editor { padding: 10px; border: 1px solid #393d45; border-radius: 6px; background: #1a1c20; }
+.waypoint-row { display: grid; grid-template-columns: 18px repeat(3, minmax(0, 1fr)) auto; align-items: center; gap: 5px; }
 .resource-row.selected { background: #1b3143; border-color: #4dabf7; }
 .drone-dot { width: 9px; height: 9px; flex: 0 0 9px; border-radius: 50%; background: #4dabf7; }
 .resource-main { min-width: 0; flex: 1; }

@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Accordion, ActionIcon, Badge, Button, Group, Modal, Stack, Text, TextInput, Tooltip, MantineProvider } from '@mantine/core'
+import { Accordion, ActionIcon, Badge, Button, Group, Modal, NumberInput, Stack, Text, TextInput, Tooltip, MantineProvider } from '@mantine/core'
 import { useDisclosure } from '@mantine/hooks'
 import { Notifications, notifications } from '@mantine/notifications'
 import { IconActivity, IconAntennaBars5, IconChevronLeft, IconChevronRight, IconCirclePlus, IconDrone, IconMap2, IconMaximize, IconMinus, IconPlayerPause, IconPlayerPlay, IconRefresh, IconRoute, IconSettings, IconX } from '@tabler/icons-react'
@@ -18,6 +18,9 @@ type Resource = { id: string; name: string; spawn_pad_id?: string; status?: stri
 type SpawnPad = { id: string; name: string; model: string; availability: 'available' | 'occupied' | 'unavailable'; assigned_drone_id: string | null; unavailable_reason: string | null; surface_pose: { position: { x: number; y: number; z: number } }; spawn_pose: { position: { x: number; y: number; z: number }; orientation: { x: number; y: number; z: number; w: number } }; supported_models: string[] }
 type SpawnPadCatalog = { world: string; world_generation: number; coordinate_system: string; units: string; pads: SpawnPad[] }
 type FloatingWindow = { id: string; drone: string; kind: 'telemetry' | 'video' | 'logs' | 'manual'; minimized: boolean; x: number; y: number; width: number; height: number; z: number }
+type Waypoint = { x: number; y: number; z: number }
+type Mission = { id: string; name: string; world: string; revision: number; waypoints: Waypoint[]; cruise_speed_m_s: number; takeoff_height_m: number; return_height_m: number }
+type MissionDraft = Omit<Mission, 'id' | 'revision'> & { id?: string; revision?: number }
 type WorkspaceState = { selectedDrone: string | null; view: '2d' | '3d'; windows: FloatingWindow[]; setSelectedDrone: (id: string | null) => void; setView: (view: '2d' | '3d') => void; openWindow: (drone: string, kind: FloatingWindow['kind']) => void; patchWindow: (id: string, patch: Partial<FloatingWindow>) => void; closeWindow: (id: string) => void }
 
 const useWorkspace = create<WorkspaceState>((set) => ({
@@ -35,6 +38,7 @@ const useWorkspace = create<WorkspaceState>((set) => ({
 }))
 
 const get = async <T,>(path: string): Promise<T> => { const response = await fetch(path); if (!response.ok) throw new Error(`${response.status} ${response.statusText}`); return response.json() }
+const missionDraft = (mission: Mission): MissionDraft => ({ id: mission.id, revision: mission.revision, name: mission.name, world: mission.world, waypoints: mission.waypoints.map((point) => ({ ...point })), cruise_speed_m_s: mission.cruise_speed_m_s, takeoff_height_m: mission.takeoff_height_m, return_height_m: mission.return_height_m })
 const queryOptions = { retry: 1, refetchInterval: 5000, staleTime: 2000 }
 
 function Workbench() {
@@ -47,6 +51,10 @@ function Workbench() {
   const [selectedPadId, setSelectedPadId] = useState<string | null>(null)
   const [creatingDrone, setCreatingDrone] = useState(false)
   const [createDroneError, setCreateDroneError] = useState<string | null>(null)
+  const [missionDraftState, setMissionDraftState] = useState<MissionDraft | null>(null)
+  const [missionSaving, setMissionSaving] = useState(false)
+  const [missionError, setMissionError] = useState<string | null>(null)
+  const [missionConflict, setMissionConflict] = useState(false)
   const queryClient = useQueryClient()
   const [viewFollow, setViewFollow] = useState(false)
   const [mapZoom, setMapZoom] = useState(1)
@@ -59,7 +67,7 @@ function Workbench() {
   const status = useQuery({ queryKey: ['status'], queryFn: () => get<Record<string, unknown>>('/api/v1/system/status'), ...queryOptions })
   const world = useQuery({ queryKey: ['world'], queryFn: () => get<Record<string, unknown>>('/api/v1/world'), ...queryOptions })
   const drones = useQuery({ queryKey: ['drones'], queryFn: () => get<Resource[]>('/api/v1/drones/'), ...queryOptions })
-  const missions = useQuery({ queryKey: ['missions'], queryFn: () => get<Resource[]>('/api/v1/missions/'), ...queryOptions })
+  const missions = useQuery({ queryKey: ['missions'], queryFn: () => get<Mission[]>('/api/v1/missions/'), ...queryOptions })
   const map = useQuery({ queryKey: ['world-map'], queryFn: () => get<Record<string, unknown>>('/api/v1/world/map'), retry: false })
   const localMap = useQuery({ queryKey: ['local-world-manifest'], queryFn: () => get<MapManifest>(worldManifestUrl), retry: false, staleTime: Infinity })
   const localGlb = useQuery({ queryKey: ['local-world-glb'], queryFn: async () => { const response = await fetch(worldGlbUrl, { method: 'HEAD' }); if (!response.ok) throw new Error('GLB asset unavailable'); return true }, retry: false, staleTime: Infinity })
@@ -67,6 +75,7 @@ function Workbench() {
 
   const droneRows = useMemo(() => Array.isArray(drones.data) ? drones.data : [], [drones.data])
   const missionRows = useMemo(() => Array.isArray(missions.data) ? missions.data : [], [missions.data])
+  const missionDirty = Boolean(missionDraftState && (missionDraftState.id ? JSON.stringify(missionDraftState) !== JSON.stringify(missionRows.find((row) => row.id === missionDraftState.id) ? missionDraft(missionRows.find((row) => row.id === missionDraftState.id)!) : null) : true))
   const poseDroneKeys = droneRows.filter((drone) => !['creating', 'resetting', 'deleting', 'failed'].includes(drone.status ?? '')).map((drone) => [drone.id, drone.binding?.generation ?? null] as const)
   const poseDroneIds = JSON.stringify(poseDroneKeys)
   useEffect(() => {
@@ -133,6 +142,37 @@ function Workbench() {
   const droneFocus = focusedDrone ? mapDrones.find((drone) => drone.id === focusedDrone.id)?.simulation?.pose?.position : undefined
   const cameraFocus: [number, number, number] = !focusWorld && droneFocus ? [droneFocus.x, droneFocus.y, droneFocus.z] : [0, 0, 0]
 
+  const beginMission = () => {
+    setMissionError(null); setMissionConflict(false)
+    setMissionDraftState({ name: `Миссия ${missionRows.length + 1}`, world: String(world.data?.name ?? 'empty'), waypoints: [{ x: 0, y: 0, z: 10 }], cruise_speed_m_s: 2, takeoff_height_m: 10, return_height_m: 10 })
+  }
+  const editMission = (mission: Mission) => {
+    setMissionError(null); setMissionConflict(false); setMissionDraftState(missionDraft(mission))
+  }
+  const patchMission = (patch: Partial<MissionDraft>) => setMissionDraftState((draft) => draft ? { ...draft, ...patch } : draft)
+  const saveMission = async () => {
+    const draft = missionDraftState
+    if (!draft || !draft.name.trim() || draft.waypoints.length < 1 || missionSaving) return
+    setMissionSaving(true); setMissionError(null); setMissionConflict(false)
+    const body = { name: draft.name.trim(), world: draft.world, waypoints: draft.waypoints, cruise_speed_m_s: draft.cruise_speed_m_s, takeoff_height_m: draft.takeoff_height_m, return_height_m: draft.return_height_m, ...(draft.id ? { expected_revision: draft.revision } : {}) }
+    try {
+      const response = await fetch(draft.id ? `/api/v1/missions/${encodeURIComponent(draft.id)}/` : '/api/v1/missions/', { method: draft.id ? 'PUT' : 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) })
+      const result = await response.json().catch(() => null) as (Mission & { error?: { code?: string; message?: string } }) | null
+      if (!response.ok) {
+        if (response.status === 409 || result?.error?.code === 'mission_revision_conflict') setMissionConflict(true)
+        throw new Error(result?.error?.message ?? `Не удалось сохранить миссию (${response.status})`)
+      }
+      setMissionDraftState(missionDraft(result!)); await queryClient.invalidateQueries({ queryKey: ['missions'] })
+      notifications.show({ message: 'Миссия сохранена', color: 'green' })
+    } catch (error) { setMissionError(error instanceof Error ? error.message : 'Не удалось сохранить миссию') }
+    finally { setMissionSaving(false) }
+  }
+  const reloadMission = async () => {
+    if (!missionDraftState?.id) return
+    try { const latest = await get<Mission>(`/api/v1/missions/${encodeURIComponent(missionDraftState.id)}/`); setMissionDraftState(missionDraft(latest)); setMissionConflict(false); setMissionError(null); await queryClient.invalidateQueries({ queryKey: ['missions'] }) }
+    catch (error) { setMissionError(error instanceof Error ? error.message : 'Не удалось перечитать миссию') }
+  }
+
   const createDrone = async () => {
     if (!selectedPad || selectedPad.availability !== 'available' || creatingDrone) return
     setCreatingDrone(true)
@@ -196,11 +236,21 @@ function Workbench() {
               {!droneRows.length && !drones.isLoading && !drones.isError && <EmptyHint text="В мире пока нет дронов" />}
             </Accordion.Panel></Accordion.Item>
             <Accordion.Item value="missions"><Accordion.Control icon={<IconRoute size={17} />}>Миссии <span className="count">{missionRows.length}</span></Accordion.Control><Accordion.Panel>
-              <Group grow mb="sm"><Button size="xs" disabled leftSection={<IconCirclePlus size={14} />} variant="light" title="Редактор миссий будет подключён после редактора карты">Новая миссия</Button><Button size="xs" variant="default" onClick={() => void missions.refetch()}><IconRefresh size={14} /></Button></Group>
-              {missionRows.map((mission) => <div className="mission-row" key={mission.id}><IconRoute size={16} /><div className="resource-main"><Text size="sm" fw={500}>{mission.name || mission.id}</Text><Text size="xs" c="dimmed">{String(mission.revision ? `Редакция ${mission.revision}` : 'Сохранённая миссия')}</Text></div></div>)}
+              <Group grow mb="sm"><Button size="xs" leftSection={<IconCirclePlus size={14} />} variant="light" onClick={beginMission}>Новая миссия</Button><Button size="xs" variant="default" aria-label="Обновить миссии" onClick={() => void missions.refetch()}><IconRefresh size={14} /></Button></Group>
+              {missionRows.map((mission) => <button type="button" className={`mission-row ${missionDraftState?.id === mission.id ? 'selected' : ''}`} key={mission.id} onClick={() => editMission(mission)}><IconRoute size={16} /><div className="resource-main"><Text size="sm" fw={500}>{mission.name || mission.id}</Text><Text size="xs" c="dimmed">Редакция {mission.revision} · {mission.waypoints.length} точек</Text></div></button>)}
               {!missionRows.length && !missions.isError && <EmptyHint text="Выберите сохранённую миссию или создайте новую" />}
               {missions.isError && <InlineError message="Не удалось загрузить миссии" onRetry={() => void missions.refetch()} />}
-              <Text size="xs" c="dimmed" mt="sm">Редактор маршрута появится после подключения пакета участка.</Text>
+              {missionDraftState && <Stack gap="xs" mt="md" className="mission-editor">
+                <Group justify="space-between"><Text size="sm" fw={600}>{missionDraftState.id ? `Редакция ${missionDraftState.revision}` : 'Черновик миссии'}</Text><Badge size="xs" color={missionDirty ? 'yellow' : 'gray'}>{missionDirty ? 'Есть изменения' : 'Сохранено'}</Badge></Group>
+                <TextInput size="xs" label="Название" value={missionDraftState.name} onChange={(event) => patchMission({ name: event.currentTarget.value })} maxLength={100} />
+                <Group grow><NumberInput size="xs" label="Скорость, м/с" min={0.1} max={3} step={0.1} decimalScale={1} value={missionDraftState.cruise_speed_m_s} onChange={(value) => patchMission({ cruise_speed_m_s: Number(value) })} /><NumberInput size="xs" label="Взлёт, м" min={0.1} max={100} value={missionDraftState.takeoff_height_m} onChange={(value) => patchMission({ takeoff_height_m: Number(value) })} /></Group>
+                <NumberInput size="xs" label="Высота возврата, м" min={0.1} max={100} value={missionDraftState.return_height_m} onChange={(value) => patchMission({ return_height_m: Number(value) })} />
+                <Group justify="space-between"><Text size="xs" fw={600}>Маршрут · {missionDraftState.waypoints.length} точек</Text><Button size="compact-xs" variant="default" disabled={missionDraftState.waypoints.length >= 500} onClick={() => patchMission({ waypoints: [...missionDraftState.waypoints, { ...missionDraftState.waypoints.at(-1)! }] })}>Добавить</Button></Group>
+                {missionDraftState.waypoints.map((point, index) => <div className="waypoint-row" key={index}><Text size="xs" c="dimmed">{index + 1}</Text>{(['x', 'y', 'z'] as const).map((axis) => <NumberInput key={axis} size="xs" aria-label={`Точка ${index + 1} ${axis.toUpperCase()}`} value={point[axis]} decimalScale={2} onChange={(value) => { const waypoints = missionDraftState.waypoints.map((item, itemIndex) => itemIndex === index ? { ...item, [axis]: Number(value) } : item); patchMission({ waypoints }) }} />)}<Group gap={2}><ActionIcon size="sm" variant="subtle" aria-label={`Точку ${index + 1} выше`} disabled={index === 0} onClick={() => { const waypoints = [...missionDraftState.waypoints]; [waypoints[index - 1], waypoints[index]] = [waypoints[index], waypoints[index - 1]]; patchMission({ waypoints }) }}>↑</ActionIcon><ActionIcon size="sm" variant="subtle" aria-label={`Удалить точку ${index + 1}`} disabled={missionDraftState.waypoints.length <= 1} onClick={() => patchMission({ waypoints: missionDraftState.waypoints.filter((_, itemIndex) => itemIndex !== index) })}><IconX size={14} /></ActionIcon></Group></div>)}
+                {missionError && <Text role="alert" size="xs" c="red">{missionError}</Text>}
+                {missionConflict && <Button size="compact-xs" variant="default" onClick={() => void reloadMission()}>Перечитать серверную редакцию</Button>}
+                <Group grow><Button size="xs" variant="default" onClick={() => setMissionDraftState(null)}>Закрыть</Button><Button size="xs" loading={missionSaving} disabled={!missionDirty || !missionDraftState.name.trim() || missionDraftState.waypoints.some((point) => ![point.x, point.y, point.z].every(Number.isFinite)) || missionDraftState.cruise_speed_m_s <= 0 || missionDraftState.cruise_speed_m_s > 3 || missionDraftState.takeoff_height_m <= 0 || missionDraftState.return_height_m <= 0} onClick={() => void saveMission()}>{missionDraftState.id ? 'Сохранить' : 'Создать'}</Button></Group>
+              </Stack>}
             </Accordion.Panel></Accordion.Item>
             <Accordion.Item value="world"><Accordion.Control icon={<IconSettings size={17} />}>Настройки мира</Accordion.Control><Accordion.Panel>
               <Text size="sm" fw={600}>{String(world.data?.name ?? 'Gazebo')}</Text><Text size="xs" c="dimmed" mb="sm">{world.data?.simulation && typeof world.data.simulation === 'object' && 'paused' in world.data.simulation ? (world.data.simulation.paused ? 'Симуляция на паузе' : 'Симуляция выполняется') : 'Состояние недоступно'}</Text>
@@ -223,7 +273,7 @@ function Workbench() {
         <div className="map-toolbar map-toolbar-right">
           {Object.entries({ drones: layers.drones, routes: layers.routes, pads: layers.pads, grid: layers.grid }).map(([key, enabled]) => <Button key={key} size="xs" variant={enabled ? 'light' : 'default'} onClick={() => setLayers({ ...layers, [key]: !enabled })}>{key === 'drones' ? 'Дроны' : key === 'routes' ? 'Маршруты' : key === 'pads' ? 'Площадки' : 'Сетка'}</Button>)}
         </div>
-        {mapReady && localMap.data && <MapView view={view} zoom={mapZoom} focus={cameraFocus} follow={viewFollow} manifest={localMap.data} pads={padRows} drones={mapDrones} selectedDrone={selectedDrone} showPads={layers.pads} showDrones={layers.drones} showGrid={layers.grid} onSelectDrone={(drone) => { setSelectedDrone(drone.id); setFocusWorld(false); setDroneMenu(null) }} onSelectPad={(pad) => { setSelectedPadId(pad.id); setFocusWorld(false); setCreateDroneError(null); setPadPickerMode(false); droneModal.open() }} onDroneContext={(drone, x, y) => { setSelectedDrone(drone.id); setFocusWorld(false); setDroneMenu({ id: drone.id, x, y }) }} onPointerMissed={() => { if (padPickerMode) { setPadPickerMode(false); droneModal.open() } }} />}
+        {mapReady && localMap.data && <MapView view={view} zoom={mapZoom} focus={cameraFocus} follow={viewFollow} manifest={localMap.data} pads={padRows} drones={mapDrones} route={layers.routes ? missionDraftState?.waypoints ?? [] : []} selectedDrone={selectedDrone} showPads={layers.pads} showDrones={layers.drones} showGrid={layers.grid} onSelectDrone={(drone) => { setSelectedDrone(drone.id); setFocusWorld(false); setDroneMenu(null) }} onSelectPad={(pad) => { setSelectedPadId(pad.id); setFocusWorld(false); setCreateDroneError(null); setPadPickerMode(false); droneModal.open() }} onDroneContext={(drone, x, y) => { setSelectedDrone(drone.id); setFocusWorld(false); setDroneMenu({ id: drone.id, x, y }) }} onPointerMissed={() => { if (padPickerMode) { setPadPickerMode(false); droneModal.open() } }} />}
         {!mapReady && <div className="map-prerequisite"><IconMap2 size={34} stroke={1.4} /><Text fw={600} mt="md">{map.isError || localMap.isError || localGlb.isError ? 'Не удалось загрузить пакет участка' : map.data?.available && !localMatchesBackend ? 'Пакет карты не совпадает с Backend' : map.data?.available ? 'Загрузка модели участка…' : 'Пакет участка не подключён'}</Text><Text size="sm" c="dimmed" ta="center" maw={440}>{map.isError || localMap.isError || localGlb.isError ? 'Проверьте локальную поставку world.glb/manifest и доступность Backend.' : map.data?.available && !localMatchesBackend ? `Backend: ${String(map.data.package_id)} ${String(map.data.version)}; браузер: ${localMap.data?.package_id ?? 'manifest недоступен'} ${localMap.data?.version ?? ''}.` : 'Карта появится после загрузки локального Blender-пакета и сверки его версии с Backend.'}</Text><Badge variant="outline" color="yellow" mt="sm">Карта и управление полётом заблокированы</Badge></div>}
         {selectedDrone && <div className="selected-drone-chip"><span className="drone-dot" /><div><Text size="sm" fw={600}>Выбранный дрон</Text><Text size="xs" c="dimmed">{selectedDrone} · {selectedPoseCurrent ? `обновлено ${String(selectedPoseEnvelope?.data?.age_s ?? '—')} с назад` : 'ожидание позы'}</Text></div><ActionIcon variant="subtle" aria-label="Открыть телеметрию" onClick={() => openWindow(selectedDrone, 'telemetry')}><IconActivity size={16} /></ActionIcon></div>}
         <div className="coordinate-readout">XYZ Gazebo · м <span>{formatPosition(selectedPose ?? null)}</span></div>
