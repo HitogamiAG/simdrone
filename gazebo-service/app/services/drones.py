@@ -51,6 +51,10 @@ class DronesOperations(ServiceContext):
             if any(r.name == name for r in self.drones.values()):
                 raise ApiFault(409, "name_conflict", f"Drone name {name!r} already exists")
             rec = DroneRecord(str(uuid.uuid4()), name, body.model, path, body.pose, body.pose.model_copy(deep=True), True)
+            # Sensor publishers can survive model removal in Gazebo. Never
+            # reuse their topic namespace when the same logical name is used
+            # again; PX4 must only receive this incarnation's measurements.
+            rec.entity_name = f"{name}_spawn_{rec.id.replace('-', '')}"
             self._spawn(rec)
             rec.initial_sdf = model_sdf(self._snapshot(), rec.entity_id)
             if not rec.initial_sdf:

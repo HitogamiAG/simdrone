@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 import threading
 
-from app.api.schemas import WorldPatch
+from app.api.schemas import DroneCreate, WorldPatch
 from app.geometry import Pose, Quaternion, Vector3
 from app.main import app, create_app
 from app.errors import ApiFault
@@ -185,6 +185,37 @@ def test_reset_without_saved_sdf_cannot_remove_model(monkeypatch):
         simulator.reset_drone("one")
     assert error.value.code == "reset_unsupported"
     assert removed == []
+
+
+def test_delete_and_recreate_logical_name_never_reuses_sensor_namespace(monkeypatch):
+    simulator = RuntimeCoordinator()
+    service = simulator.drone_operations
+    simulator.pose_tracker = SimpleNamespace(condition=threading.Condition(), poses={})
+    monkeypatch.setattr(service, "_ensure_ready", lambda: None)
+    spawned, removed = [], []
+
+    def spawn(record):
+        record.entity_id = len(spawned) + 100
+        spawned.append(record.gazebo_model)
+
+    monkeypatch.setattr(service, "_spawn", spawn)
+    monkeypatch.setattr(service, "_snapshot", lambda: None)
+    monkeypatch.setattr("app.services.drones.model_sdf", lambda *_: '<sdf><model name="test"/></sdf>')
+    monkeypatch.setattr(service, "_refresh_sensors", lambda *_: None)
+    monkeypatch.setattr(service, "_retire_drone_sensors", lambda *_: None)
+    monkeypatch.setattr(service, "_remove_entity", removed.append)
+    body = DroneCreate(model="test_quad", name="same-name")
+    first = service.create_drone(body)
+    with pytest.raises(ApiFault) as error:
+        service.create_drone(body)
+    assert error.value.code == "name_conflict"
+    service.delete_drone(first["id"])
+    second = service.create_drone(body)
+    assert first["name"] == second["name"] == "same-name"
+    assert first["id"] != second["id"]
+    assert first["gazebo_model"] != second["gazebo_model"]
+    assert spawned == [first["gazebo_model"], second["gazebo_model"]]
+    assert removed == [first["gazebo_model"]]
 
 
 def test_sensor_reset_clears_cache_and_invalidates_queued_epoch(monkeypatch):

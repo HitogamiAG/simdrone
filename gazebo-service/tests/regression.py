@@ -59,7 +59,7 @@ async def main():
         listed = await checked(c, "GET", "/api/v1/drones/")
         assert listed[0]["pose"] == changed["pose"]
         world = await checked(c, "GET", "/api/v1/world")
-        assert next(m for m in world["models"] if m["name"] == d["name"])["pose"] == changed["pose"]
+        assert next(m for m in world["models"] if m["name"] == d["gazebo_model"])["pose"] == changed["pose"]
         print("PASS drone pose: PATCH removed; create pose and live GET/list/world remain", flush=True)
 
         # External Transport changes must be visible, and partial API PATCH must preserve them.
